@@ -1,6 +1,6 @@
 blueprint:
-  name: Motion-activated Light With Enable Switch and Modes
-  description: Turn on a light when motion is detected and Automation is Enabled.
+  name: Motion-activated Lights
+  description: Turn on a light when motion is detected
   domain: automation
   author: Zachary Priddy & Delta Regeer
   input:
