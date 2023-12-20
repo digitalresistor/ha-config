@@ -22,11 +22,6 @@ blueprint:
       selector:
         entity:
           domain: input_boolean
-    custom_conditions:
-      name: Custom run conditions
-      default: 
-      selector:
-        condition: {}
     light_target:
       name: Lights
       default: {}
@@ -82,7 +77,6 @@ condition:
     state: "on"
   - condition: template
     value_template: "{{in_run_mode == true}}"
-  - condition: !input custom_conditions
 
 action:
   - choose:
