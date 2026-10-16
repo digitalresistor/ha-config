@@ -1,0 +1,232 @@
+blueprint:
+  name: Occupancy-activated Lights
+  description: >-
+    Keep lights on while any motion/occupancy sensor detects someone, and for
+    a while after a door opens or closes.
+
+    Lights turn on when a sensor detects motion or a door opens/closes. They
+    turn off once every sensor has been clear for the wait time and the door
+    time has passed since the last door event. Motion keeps the lights on
+    indefinitely, no matter how long it lasts.
+
+    Works with sensors that stay on for as long as someone is there (Eve,
+    IKEA VALLHORN/MYGGSPRAY) and with sensors that report for a fixed time and
+    retrigger (older IKEA TRADFRI). Only "on" counts as motion, so sensors
+    that drop to unavailable between reports are treated as clear.
+
+    If an Adaptive Lighting switch is selected, every light configured in that
+    Adaptive Lighting instance is turned on/off by entity id, so Adaptive
+    Lighting can adapt them as they turn on. The Adaptive Lighting instance
+    needs "include_config_in_attributes" enabled so its light list can be read.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/occupancy_lights.yml
+  input:
+    motion_entities:
+      name: Motion Sensors
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+            device_class:
+              - motion
+              - occupancy
+              - presence
+    door_entities:
+      name: Doors
+      description: >-
+        Doors, garage doors or covers. Each time one opens or closes the
+        lights turn on for at least the door time.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - door
+                - garage_door
+                - opening
+                - window
+            - domain: cover
+    automation_enabled:
+      name: Automation Switch
+      description: Leave empty to always run.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    adaptive_lighting_switch:
+      name: Adaptive Lighting
+      description: >-
+        The main Adaptive Lighting switch for the area (not the sleep mode,
+        adapt color or adapt brightness switch). All of its lights are
+        controlled by this automation.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: adaptive_lighting
+    light_target:
+      name: Additional Lights
+      description: Lights to control in addition to the Adaptive Lighting lights.
+      default: {}
+      selector:
+        target:
+          entity:
+            domain: light
+    switch_target:
+      name: Switches
+      default: {}
+      selector:
+        target:
+          entity:
+            domain: switch
+    no_motion_wait:
+      name: Wait time
+      description: Time to leave the lights on after every sensor is clear.
+      default: 300
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: seconds
+    door_time:
+      name: Door time
+      description: Time to leave the lights on after a door opens or closes, if there is no motion.
+      default: 300
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: seconds
+
+# Every sensor or door change restarts the run, which then works out from the
+# current state how long the lights still need to stay on.
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    id: motion
+    entity_id: !input motion_entities
+    to: "on"
+  - trigger: state
+    id: motion_clear
+    entity_id: !input motion_entities
+    from: "on"
+  - trigger: state
+    id: door
+    entity_id: !input door_entities
+  - trigger: homeassistant
+    id: start
+    event: start
+
+variables:
+  motion_entities: !input motion_entities
+  door_entities: !input door_entities
+  automation_enabled: !input automation_enabled
+  no_motion_wait: !input no_motion_wait
+  door_time: !input door_time
+  open_states: ["on", "open", "opening", "closing"]
+  adaptive_lighting_switch: !input adaptive_lighting_switch
+  adaptive_lighting_lights: >
+    {{ (state_attr(adaptive_lighting_switch, 'configuration') or {}).get('lights', [])
+       if adaptive_lighting_switch else [] }}
+  light_target: !input light_target
+  switch_target: !input switch_target
+  has_lights: "{{ light_target.values() | select | list | length > 0 }}"
+  has_switches: "{{ switch_target.values() | select | list | length > 0 }}"
+
+conditions:
+  - condition: template
+    value_template: "{{ not automation_enabled or is_state(automation_enabled, 'on') }}"
+  # A door event is an open, or a close from open. Sensors coming back from
+  # unavailable/unknown as closed are not.
+  - condition: template
+    value_template: >-
+      {{ trigger.id != 'door'
+         or trigger.to_state.state in open_states
+         or (trigger.from_state.state in open_states
+             and trigger.to_state.state not in ['unavailable', 'unknown']) }}
+
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ adaptive_lighting_switch and not adaptive_lighting_lights }}"
+    then:
+      - stop: >-
+          No lights found on the Adaptive Lighting switch, make sure it is the
+          main switch and include_config_in_attributes is enabled.
+        error: true
+
+  - if:
+      - condition: template
+        value_template: "{{ trigger.id in ['motion', 'door'] }}"
+    then:
+      - parallel:
+          - alias: "Turn on Adaptive Lighting Lights"
+            if:
+              - condition: template
+                value_template: "{{ adaptive_lighting_lights | length > 0 }}"
+            then:
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ adaptive_lighting_lights }}"
+          - alias: "Turn on Additional Lights"
+            if:
+              - condition: template
+                value_template: "{{ has_lights }}"
+            then:
+              - action: light.turn_on
+                target: !input light_target
+          - alias: "Turn on Switches"
+            if:
+              - condition: template
+                value_template: "{{ has_switches }}"
+            then:
+              - action: switch.turn_on
+                target: !input switch_target
+
+  - alias: Wait until every sensor is clear
+    wait_template: "{{ motion_entities | select('is_state', 'on') | list | length == 0 }}"
+
+  # Sensors and doors only change state when something happens (or when they
+  # drop to/return from unavailable, which can only make this longer), so the
+  # most recent change is when they last saw activity.
+  - variables:
+      last_motion: "{{ expand(motion_entities) | map(attribute='last_changed') | max | default(now(), true) }}"
+      last_door: "{{ expand(door_entities) | map(attribute='last_changed') | max | default(none, true) }}"
+      motion_remaining: "{{ no_motion_wait - (now() - as_datetime(last_motion)).total_seconds() }}"
+      door_remaining: >-
+        {{ door_time - (now() - as_datetime(last_door)).total_seconds() if last_door else 0 }}
+      remaining: "{{ [motion_remaining | float, door_remaining | float, 0] | max | round(0) }}"
+  - delay:
+      seconds: "{{ remaining }}"
+
+  - parallel:
+      - alias: "Turn off Adaptive Lighting Lights"
+        if:
+          - condition: template
+            value_template: "{{ adaptive_lighting_lights | length > 0 }}"
+        then:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ adaptive_lighting_lights }}"
+      - alias: "Turn off Additional Lights"
+        if:
+          - condition: template
+            value_template: "{{ has_lights }}"
+        then:
+          - action: light.turn_off
+            target: !input light_target
+      - alias: "Turn off Switches"
+        if:
+          - condition: template
+            value_template: "{{ has_switches }}"
+        then:
+          - action: switch.turn_off
+            target: !input switch_target

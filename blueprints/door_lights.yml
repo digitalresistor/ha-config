@@ -1,0 +1,185 @@
+blueprint:
+  name: Door-activated Lights
+  description: >-
+    Turn lights on while a door is open and off when it closes, for spaces
+    like closets that have no motion sensor.
+
+    In the away modes (Away by default) the lights also turn off after the
+    away timeout, even if the door is still open, to save power.
+
+    If an Adaptive Lighting switch is selected, every light configured in that
+    Adaptive Lighting instance is turned on/off by entity id, so Adaptive
+    Lighting can adapt them as they turn on. The Adaptive Lighting instance
+    needs "include_config_in_attributes" enabled so its light list can be read.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/door_lights.yml
+  input:
+    door_entities:
+      name: Doors
+      description: Lights stay on while any of these is open.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - door
+                - garage_door
+                - opening
+                - window
+            - domain: cover
+    adaptive_lighting_switch:
+      name: Adaptive Lighting
+      description: >-
+        The main Adaptive Lighting switch for the area (not the sleep mode,
+        adapt color or adapt brightness switch). All of its lights are
+        controlled by this automation.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: adaptive_lighting
+    light_target:
+      name: Additional Lights
+      description: Lights to control in addition to the Adaptive Lighting lights.
+      default: {}
+      selector:
+        target:
+          entity:
+            domain: light
+    switch_target:
+      name: Switches
+      default: {}
+      selector:
+        target:
+          entity:
+            domain: switch
+    away_modes:
+      name: Away Modes
+      description: Values of input_select.mode in which the lights turn off after the away timeout.
+      default:
+        - Away
+      selector:
+        select:
+          options:
+            - Home
+            - Away
+            - Night
+            - Movie
+            - No Automation
+          multiple: true
+    away_timeout:
+      name: Away timeout
+      description: Time to leave the lights on with the door open in an away mode.
+      default: 300
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: seconds
+
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input door_entities
+    not_to:
+      - unavailable
+      - unknown
+  - trigger: state
+    entity_id: input_select.mode
+  - trigger: homeassistant
+    event: start
+
+variables:
+  door_entities: !input door_entities
+  open_states: ["on", "open", "opening", "closing"]
+  open_doors: "{{ door_entities | select('is_state', open_states) | list }}"
+  away_modes: !input away_modes
+  away_timeout: !input away_timeout
+  in_away_mode: "{{ states('input_select.mode') in away_modes }}"
+  # In an away mode the lights stay on for the away timeout, counted from when
+  # the door was opened.
+  away_until: >-
+    {{ (expand(open_doors) | map(attribute='last_changed') | max | as_timestamp) + away_timeout
+       if open_doors and in_away_mode else 0 }}
+  away_remaining: "{{ [away_until - as_timestamp(now()), 0] | max }}"
+  lights_on: "{{ open_doors | length > 0 and (not in_away_mode or away_remaining > 0) }}"
+  action_service: "{{ 'turn_on' if lights_on else 'turn_off' }}"
+  adaptive_lighting_switch: !input adaptive_lighting_switch
+  adaptive_lighting_lights: >
+    {{ (state_attr(adaptive_lighting_switch, 'configuration') or {}).get('lights', [])
+       if adaptive_lighting_switch else [] }}
+  light_target: !input light_target
+  switch_target: !input switch_target
+  has_lights: "{{ light_target.values() | select | list | length > 0 }}"
+  has_switches: "{{ switch_target.values() | select | list | length > 0 }}"
+
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ adaptive_lighting_switch and not adaptive_lighting_lights }}"
+    then:
+      - stop: >-
+          No lights found on the Adaptive Lighting switch, make sure it is the
+          main switch and include_config_in_attributes is enabled.
+        error: true
+
+  - parallel:
+      - alias: "Adaptive Lighting Lights"
+        if:
+          - condition: template
+            value_template: "{{ adaptive_lighting_lights | length > 0 }}"
+        then:
+          - action: "light.{{ action_service }}"
+            target:
+              entity_id: "{{ adaptive_lighting_lights }}"
+      - alias: "Additional Lights"
+        if:
+          - condition: template
+            value_template: "{{ has_lights }}"
+        then:
+          - action: "light.{{ action_service }}"
+            target: !input light_target
+      - alias: "Switches"
+        if:
+          - condition: template
+            value_template: "{{ has_switches }}"
+        then:
+          - action: "switch.{{ action_service }}"
+            target: !input switch_target
+
+  - if:
+      - condition: template
+        value_template: "{{ lights_on and in_away_mode }}"
+    then:
+      # Turning the lights on can take a while, so wait until away_until
+      # rather than for away_remaining.
+      - delay:
+          seconds: "{{ [away_until - as_timestamp(now()), 0] | max | round(1) }}"
+      - parallel:
+          - alias: "Turn off Adaptive Lighting Lights"
+            if:
+              - condition: template
+                value_template: "{{ adaptive_lighting_lights | length > 0 }}"
+            then:
+              - action: light.turn_off
+                target:
+                  entity_id: "{{ adaptive_lighting_lights }}"
+          - alias: "Turn off Additional Lights"
+            if:
+              - condition: template
+                value_template: "{{ has_lights }}"
+            then:
+              - action: light.turn_off
+                target: !input light_target
+          - alias: "Turn off Switches"
+            if:
+              - condition: template
+                value_template: "{{ has_switches }}"
+            then:
+              - action: switch.turn_off
+                target: !input switch_target
