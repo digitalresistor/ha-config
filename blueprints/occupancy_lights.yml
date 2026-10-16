@@ -2,12 +2,13 @@ blueprint:
   name: Occupancy-activated Lights
   description: >-
     Keep lights on while any motion/occupancy sensor detects someone, and for
-    a while after a door opens or closes.
+    a while after a door opens or closes, or while a door is left open.
 
     Lights turn on when a sensor detects motion or a door opens/closes. They
     turn off once every sensor has been clear for the wait time and the door
     time has passed since the last door event. Motion keeps the lights on
-    indefinitely, no matter how long it lasts.
+    indefinitely, no matter how long it lasts, and so do doors in "Doors that
+    keep lights on while open" for as long as they are open.
 
     Works with sensors that stay on for as long as someone is there (Eve,
     IKEA VALLHORN/MYGGSPRAY) and with sensors that report for a fixed time and
@@ -38,6 +39,24 @@ blueprint:
       description: >-
         Doors, garage doors or covers. Each time one opens or closes the
         lights turn on for at least the door time.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - door
+                - garage_door
+                - opening
+                - window
+            - domain: cover
+    hold_open_entities:
+      name: Doors that keep lights on while open
+      description: >-
+        Doors, garage doors or covers that keep the lights on for as long as
+        they are open, e.g. a garage door. Opening and closing them also counts
+        as a door event, so the door time starts when they close.
       default: []
       selector:
         entity:
@@ -121,6 +140,9 @@ triggers:
   - trigger: state
     id: door
     entity_id: !input door_entities
+  - trigger: state
+    id: door
+    entity_id: !input hold_open_entities
   - trigger: homeassistant
     id: start
     event: start
@@ -128,6 +150,7 @@ triggers:
 variables:
   motion_entities: !input motion_entities
   door_entities: !input door_entities
+  hold_open_entities: !input hold_open_entities
   automation_enabled: !input automation_enabled
   no_motion_wait: !input no_motion_wait
   door_time: !input door_time
@@ -191,15 +214,19 @@ actions:
               - action: switch.turn_on
                 target: !input switch_target
 
-  - alias: Wait until every sensor is clear
-    wait_template: "{{ motion_entities | select('is_state', 'on') | list | length == 0 }}"
+  - alias: Wait until every sensor is clear and no door is held open
+    wait_template: >-
+      {{ motion_entities | select('is_state', 'on') | list | length == 0
+         and hold_open_entities | select('is_state', open_states) | list | length == 0 }}
 
   # Sensors and doors only change state when something happens (or when they
   # drop to/return from unavailable, which can only make this longer), so the
   # most recent change is when they last saw activity.
   - variables:
       last_motion: "{{ expand(motion_entities) | map(attribute='last_changed') | max | default(now(), true) }}"
-      last_door: "{{ expand(door_entities) | map(attribute='last_changed') | max | default(none, true) }}"
+      last_door: >-
+        {{ expand(door_entities + hold_open_entities) | map(attribute='last_changed')
+           | max | default(none, true) }}
       motion_remaining: "{{ no_motion_wait - (now() - as_datetime(last_motion)).total_seconds() }}"
       door_remaining: >-
         {{ door_time - (now() - as_datetime(last_door)).total_seconds() if last_door else 0 }}
