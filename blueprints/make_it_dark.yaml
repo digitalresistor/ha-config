@@ -1,0 +1,138 @@
+blueprint:
+  name: Make It Dark
+  source_url: https://raw.githubusercontent.com/zpriddy/Home-Assistant/main/scripts/make_it_dark.yaml
+  author: Zachary Priddy
+  description: >-
+    A script to make it dark in a selected area. This will also look at the
+    current mode of the home, and if the mode is set to night, then it will dim 
+    the lights to 1%, change them to the adaptive lighting sleep mode settings,
+    turn them off and turn on adaptive lighting sleep mode. For any other mode,
+    this will just turn off the lights slowly.
+  domain: script
+  input:
+    adaptive_lighting_config:
+      name: "Adaptive Lighting Config"
+      description: "The adaptive lighting config for the area"
+      selector:
+        entity:
+          filter:
+            integration: "adaptive_lighting"
+    adaptive_lighting_sleep:
+      name: "Adaptive Lighting Sleep Mode Switch"
+      description: "The sleep mode switch for adaptive lighting for the area"
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: "adaptive_lighting"
+    light_target:
+      name: "Target Lights"
+      default: { "entity_id": [] }
+      description: "Target lights to turn off"
+      selector:
+        target:
+          entity:
+            domain:
+              - light
+    switch_target:
+      name: "Target Switches"
+      default: { "entity_id": [] }
+      description: "Target switches to turn off"
+      selector:
+        target:
+          entity:
+            domain:
+              - switch
+
+mode: single
+icon: mdi:weather-night
+
+sequence:
+  - variables:
+      adaptive_lighting_config: !input adaptive_lighting_config
+      adaptive_lighting_lights: >-
+        {{
+          state_attr(adaptive_lighting_config,'configuration')['lights']
+        }}
+      sleep_color: >-
+        {{
+          state_attr(adaptive_lighting_config,'configuration')['sleep_rgb_color']
+        }}
+  - if:
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: input_select.mode
+            state: Home
+          - condition: state
+            entity_id: input_select.mode
+            state: Away
+    then:
+      - parallel:
+          - service: light.turn_off
+            data:
+              transition: 4
+            target: !input light_target
+          - service: light.turn_off
+            data:
+              transition: 4
+            target:
+              entity_id: "{{adaptive_lighting_lights}}"
+          - service: switch.turn_off
+            target: !input switch_target
+      - delay:
+          hours: 0
+          minutes: 0
+          seconds: 5
+          milliseconds: 0
+    else:
+      - service: switch.turn_off
+        target:
+          entity_id: !input adaptive_lighting_config
+      - parallel:
+          - service: light.turn_off
+            data:
+              transition: 4
+            target: !input light_target
+          - service: switch.turn_off
+            data: {}
+            target: !input switch_target
+          - service: light.turn_off
+            data:
+              transition: 4
+            target:
+              entity_id: "{{adaptive_lighting_lights}}"
+
+      - delay:
+          hours: 0
+          minutes: 0
+          seconds: 5
+          milliseconds: 0
+      - service: light.turn_on
+        data:
+          transition: 0
+          brightness: 1
+          rgb_color: "{{sleep_color}}"
+        target:
+          entity_id: "{{adaptive_lighting_lights}}"
+      # - delay:
+      #     hours: 0
+      #     minutes: 0
+      #     seconds: 2
+      #     milliseconds: 0
+      - service: light.turn_off
+        data:
+          transition: 1
+        target:
+          entity_id: "{{adaptive_lighting_lights}}"
+      - delay:
+          hours: 0
+          minutes: 0
+          seconds: 5
+          milliseconds: 0
+      - service: switch.turn_on
+        target:
+          entity_id: !input adaptive_lighting_sleep
+      - service: switch.turn_on
+        target:
+          entity_id: !input adaptive_lighting_config
