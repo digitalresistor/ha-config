@@ -1,0 +1,280 @@
+blueprint:
+  name: Bathroom Fan
+  description: >-
+    Run a bathroom fan automatically and make sure it is never left running.
+
+    - Fan turned on manually: runs while the lights are on, and for the
+      lights off time after they turn off.
+    - Lights on for the toilet time (e.g. kept on by motion): the fan turns on
+      and is treated as if it was turned on manually.
+    - Humidity rises sharply (shower): the fan turns on, also if it was already
+      running, and runs until the humidity is back to its steady level before
+      the shower (plus the margin) or for the shower run time, whichever is
+      shorter.
+    - The fan never runs longer than the maximum run time, whatever turned it
+      on. Turning it off by hand always wins.
+
+    Needs an input_text helper (max length 255) to remember the steady
+    humidity and shower state across restarts.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/bathroom_fan.yml
+  input:
+    fan_entity:
+      name: Fan
+      selector:
+        entity:
+          filter:
+            - domain: switch
+            - domain: fan
+    light_entities:
+      name: Lights
+      description: The bathroom lights. Any of them being on counts as the lights being on.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: switch
+            - domain: light
+    humidity_sensor:
+      name: Humidity Sensor
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: humidity
+    state_helper:
+      name: State Helper
+      description: An input_text helper (max length 255) used to store the fan state.
+      selector:
+        entity:
+          filter:
+            domain: input_text
+    humidity_rise:
+      name: Humidity rise
+      description: Rise above the steady humidity that counts as a shower.
+      default: 10
+      selector:
+        number:
+          min: 2
+          max: 50
+          unit_of_measurement: "%"
+    humidity_margin:
+      name: Humidity margin
+      description: >-
+        The shower is over once humidity is back within this percentage of the
+        steady humidity before the shower (20% of 30% is 36%).
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    shower_time:
+      name: Shower run time
+      description: Longest time to run the fan for a shower.
+      default: 7200
+      selector:
+        number:
+          min: 60
+          max: 14400
+          unit_of_measurement: seconds
+    lights_off_time:
+      name: Lights off time
+      description: Time to keep a manually started fan running after the lights turn off.
+      default: 1800
+      selector:
+        number:
+          min: 0
+          max: 7200
+          unit_of_measurement: seconds
+    toilet_time:
+      name: Toilet time
+      description: Turn the fan on once the lights have been on this long.
+      default: 600
+      selector:
+        number:
+          min: 60
+          max: 7200
+          unit_of_measurement: seconds
+    max_run_time:
+      name: Maximum run time
+      description: The fan is always turned off after running this long.
+      default: 10800
+      selector:
+        number:
+          min: 60
+          max: 43200
+          unit_of_measurement: seconds
+
+# Every change restarts the run, which works out from the stored state and the
+# current state what the fan should do and when it next needs to turn off.
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    id: humidity
+    entity_id: !input humidity_sensor
+    not_to:
+      - unavailable
+      - unknown
+  - trigger: state
+    id: lights
+    entity_id: !input light_entities
+  - trigger: state
+    id: toilet
+    entity_id: !input light_entities
+    to: "on"
+    for:
+      seconds: !input toilet_time
+  - trigger: state
+    id: fan
+    entity_id: !input fan_entity
+    not_to:
+      - unavailable
+      - unknown
+  - trigger: homeassistant
+    id: start
+    event: start
+  # Reloading automations (which saving one does) cancels a pending turn off.
+  - trigger: event
+    id: start
+    event_type: automation_reloaded
+
+variables:
+  fan_entity: !input fan_entity
+  light_entities: !input light_entities
+  humidity_sensor: !input humidity_sensor
+  state_helper: !input state_helper
+  humidity_rise: !input humidity_rise
+  humidity_margin: !input humidity_margin
+  shower_time: !input shower_time
+  lights_off_time: !input lights_off_time
+  toilet_time: !input toilet_time
+  max_run_time: !input max_run_time
+  # Humidity that has stayed between steady + 3 and steady + rise for this
+  # long is accepted as the new steady humidity (weather, not a shower).
+  steady_drift: 3
+  steady_accept_time: 3600
+
+actions:
+  # The state helper holds JSON:
+  #   steady/steady_at: steady humidity and when it was last updated
+  #   shower/base/since: whether a shower is going on, the steady humidity
+  #     before it and when it started
+  #   fan_on: when the fan turned on
+  # "shower" is always a JSON true/false, which keeps Home Assistant from
+  # turning the rendered JSON into a dict before it is stored.
+  - variables:
+      now_ts: "{{ now().timestamp() | int }}"
+      stored: >-
+        {%- set raw = states(state_helper) -%}
+        {{ raw | from_json(default={}) if raw not in ['unknown', 'unavailable', ''] else {} }}
+      humidity: "{{ states(humidity_sensor) | float(none) }}"
+      fan_on: "{{ is_state(fan_entity, 'on') }}"
+      lights_on: "{{ light_entities | select('is_state', 'on') | list | length > 0 }}"
+      lights_changed: "{{ expand(light_entities) | map(attribute='last_changed') | max | as_timestamp | int }}"
+      # Turning the fan off by hand also ends a shower.
+      fan_turned_off: "{{ trigger.id == 'fan' and trigger.to_state.state == 'off' }}"
+
+  # Track the steady humidity and detect the start/end of a shower.
+  - variables:
+      steady: "{{ stored.get('steady') }}"
+      steady_at: "{{ stored.get('steady_at') or now_ts }}"
+      in_shower: "{{ stored.get('shower', false) }}"
+      base: "{{ stored.get('base') }}"
+      since: "{{ stored.get('since') or now_ts }}"
+      shower_over: >-
+        {{ in_shower and (fan_turned_off
+           or (humidity is not none and humidity <= base * (1 + humidity_margin / 100))
+           or now_ts - since >= shower_time) }}
+      shower_starts: >-
+        {{ not in_shower and not fan_turned_off and humidity is not none
+           and steady is not none and humidity - steady >= humidity_rise }}
+      update_steady: >-
+        {{ humidity is not none and not in_shower and not shower_starts
+           and (steady is none or humidity <= steady + steady_drift
+                or now_ts - steady_at >= steady_accept_time) }}
+      new_state: >-
+        {%- set s = dict(steady=steady, steady_at=steady_at, shower=in_shower, base=base,
+                         since=since if in_shower else none,
+                         fan_on=(stored.get('fan_on') or now_ts) if fan_on else none) -%}
+        {%- if shower_starts -%}
+          {%- set s = dict(s, shower=true, base=steady, since=now_ts) -%}
+        {%- elif shower_over -%}
+          {%- set s = dict(s, shower=false, base=none, since=none,
+                           steady=humidity | round(1) if humidity is not none else steady,
+                           steady_at=now_ts) -%}
+        {%- elif update_steady -%}
+          {%- set s = dict(s, steady=humidity | round(1), steady_at=now_ts) -%}
+        {%- endif -%}
+        {{ s }}
+
+  - if:
+      - condition: template
+        value_template: "{{ new_state | to_json != states(state_helper) }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input state_helper
+        data:
+          value: "{{ new_state | to_json }}"
+
+  - choose:
+      - alias: Shower over
+        conditions:
+          - condition: template
+            value_template: "{{ shower_over and fan_on and not fan_turned_off }}"
+        sequence:
+          - action: homeassistant.turn_off
+            target:
+              entity_id: !input fan_entity
+          - stop: Shower over
+      - alias: Turn the fan on
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ not fan_on and (shower_starts
+                 or (trigger.id == 'toilet' and lights_on and not new_state.shower)) }}
+        sequence:
+          - action: homeassistant.turn_on
+            target:
+              entity_id: !input fan_entity
+          # The fan turning on restarts this automation, which takes it from here.
+          - stop: Fan turned on
+
+  - condition: template
+    value_template: "{{ fan_on }}"
+
+  # Work out when the fan has to turn off.
+  - variables:
+      fan_on_since: "{{ new_state.fan_on or now_ts }}"
+      max_deadline: "{{ fan_on_since + max_run_time }}"
+      deadline: >-
+        {%- if new_state.shower -%}
+          {{ [new_state.since + shower_time, max_deadline] | min }}
+        {%- elif lights_on -%}
+          {{ max_deadline }}
+        {%- else -%}
+          {{ [[lights_changed, fan_on_since] | max + lights_off_time, max_deadline] | min }}
+        {%- endif -%}
+  - delay:
+      seconds: "{{ [deadline | int - now().timestamp(), 0] | max | round(0) }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ new_state.shower }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input state_helper
+        data:
+          value: >-
+            {%- set h = states(humidity_sensor) | float(none) -%}
+            {{ dict(new_state, shower=false, base=none, since=none,
+                    steady=(h | round(1)) if h is not none else new_state.steady,
+                    steady_at=now().timestamp() | int) | to_json }}
+  - action: homeassistant.turn_off
+    target:
+      entity_id: !input fan_entity
