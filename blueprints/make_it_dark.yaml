@@ -1,138 +1,200 @@
 blueprint:
   name: Make It Dark
-  source_url: https://raw.githubusercontent.com/zpriddy/Home-Assistant/main/scripts/make_it_dark.yaml
-  author: Zachary Priddy
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/make_it_dark.yaml
+  author: Zachary Priddy & Delta Regeer
   description: >-
-    A script to make it dark in a selected area. This will also look at the
-    current mode of the home, and if the mode is set to night, then it will dim 
-    the lights to 1%, change them to the adaptive lighting sleep mode settings,
-    turn them off and turn on adaptive lighting sleep mode. For any other mode,
-    this will just turn off the lights slowly.
+    Make it dark in an area that uses Adaptive Lighting.
+
+    In a sleep mode (Night by default) every light is primed with the Adaptive
+    Lighting sleep color before it is turned off, so the next time it turns on
+    it starts out red/dim instead of flashing white. Lights that are on fade to
+    the sleep color first, lights that are off are briefly turned on at 1% in
+    the sleep color. Afterwards Adaptive Lighting sleep mode is turned on.
+
+    In any other mode the lights are just turned off slowly.
+
+    The Adaptive Lighting instance needs "include_config_in_attributes" enabled
+    so its lights and sleep settings can be read.
   domain: script
   input:
-    adaptive_lighting_config:
-      name: "Adaptive Lighting Config"
-      description: "The adaptive lighting config for the area"
-      selector:
-        entity:
-          filter:
-            integration: "adaptive_lighting"
-    adaptive_lighting_sleep:
-      name: "Adaptive Lighting Sleep Mode Switch"
-      description: "The sleep mode switch for adaptive lighting for the area"
+    adaptive_lighting_switch:
+      name: Adaptive Lighting
+      description: >-
+        The main Adaptive Lighting switch for the area (not the sleep mode,
+        adapt color or adapt brightness switch). All of its lights are turned
+        off.
       selector:
         entity:
           filter:
             domain: switch
-            integration: "adaptive_lighting"
+            integration: adaptive_lighting
+    adaptive_lighting_sleep:
+      name: Adaptive Lighting Sleep Mode Switch
+      description: >-
+        Leave empty to use the sleep mode switch that belongs to the selected
+        Adaptive Lighting instance.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: adaptive_lighting
     light_target:
-      name: "Target Lights"
-      default: { "entity_id": [] }
-      description: "Target lights to turn off"
+      name: Additional Lights
+      description: Lights to turn off in addition to the Adaptive Lighting lights.
+      default: {}
       selector:
         target:
           entity:
-            domain:
-              - light
+            domain: light
     switch_target:
-      name: "Target Switches"
-      default: { "entity_id": [] }
-      description: "Target switches to turn off"
+      name: Switches
+      default: {}
       selector:
         target:
           entity:
-            domain:
-              - switch
+            domain: switch
+    sleep_modes:
+      name: Sleep Modes
+      description: Values of input_select.mode that prime the lights and enable sleep mode.
+      default:
+        - Night
+      selector:
+        select:
+          options:
+            - Home
+            - Away
+            - Night
+            - Movie
+            - No Automation
+          multiple: true
+    fade_time:
+      name: Fade time
+      description: Time to fade lights that are on to the sleep color, and to turn lights off outside sleep modes.
+      default: 4
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: seconds
 
 mode: single
 icon: mdi:weather-night
 
 sequence:
   - variables:
-      adaptive_lighting_config: !input adaptive_lighting_config
-      adaptive_lighting_lights: >-
-        {{
-          state_attr(adaptive_lighting_config,'configuration')['lights']
-        }}
+      adaptive_lighting_switch: !input adaptive_lighting_switch
+      adaptive_lighting_config: "{{ state_attr(adaptive_lighting_switch, 'configuration') or {} }}"
+      adaptive_lighting_sleep_input: !input adaptive_lighting_sleep
+      adaptive_lighting_sleep: >-
+        {{ adaptive_lighting_sleep_input
+           or device_entities(device_id(adaptive_lighting_switch))
+              | select('match', 'switch\..*sleep_mode') | first | default('') }}
+      light_target: !input light_target
+      switch_target: !input switch_target
+      has_switches: "{{ switch_target.values() | select | list | length > 0 }}"
+      # Resolve the additional light target to entity ids so every light can be primed.
+      additional_lights: >-
+        {%- set ns = namespace(ids=[]) -%}
+        {%- for key, value in light_target.items() -%}
+          {%- for item in ([value] if value is string else value) -%}
+            {%- if key == 'entity_id' -%}{%- set ns.ids = ns.ids + [item] -%}
+            {%- elif key == 'device_id' -%}{%- set ns.ids = ns.ids + device_entities(item) -%}
+            {%- elif key == 'area_id' -%}{%- set ns.ids = ns.ids + area_entities(item) -%}
+            {%- elif key == 'label_id' -%}{%- set ns.ids = ns.ids + label_entities(item) -%}
+            {%- elif key == 'floor_id' -%}
+              {%- for area in floor_areas(item) -%}{%- set ns.ids = ns.ids + area_entities(area) -%}{%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endfor -%}
+        {{ ns.ids | select('match', 'light\.') | list }}
+      lights: "{{ (adaptive_lighting_config.get('lights', []) + additional_lights) | unique | list }}"
+      available_lights: "{{ lights | reject('is_state', ['unavailable', 'unknown']) | list }}"
+      lights_on: "{{ available_lights | select('is_state', 'on') | list }}"
+      lights_off: "{{ available_lights | reject('is_state', 'on') | list }}"
       sleep_color: >-
-        {{
-          state_attr(adaptive_lighting_config,'configuration')['sleep_rgb_color']
-        }}
+        {{ {'color_temp_kelvin': adaptive_lighting_config.get('sleep_color_temp', 1000)}
+           if adaptive_lighting_config.get('sleep_rgb_or_color_temp') == 'color_temp'
+           else {'rgb_color': adaptive_lighting_config.get('sleep_rgb_color', [255, 56, 0])} }}
+      fade_time: !input fade_time
+      sleep_modes: !input sleep_modes
+      in_sleep_mode: "{{ states('input_select.mode') in sleep_modes }}"
+
   - if:
-      - condition: or
-        conditions:
-          - condition: state
-            entity_id: input_select.mode
-            state: Home
-          - condition: state
-            entity_id: input_select.mode
-            state: Away
+      - condition: template
+        value_template: "{{ not adaptive_lighting_config.get('lights') or not adaptive_lighting_sleep }}"
+    then:
+      - stop: >-
+          Could not read the lights or sleep mode switch from the Adaptive
+          Lighting switch, make sure it is the main switch and
+          include_config_in_attributes is enabled.
+        error: true
+
+  - if:
+      - condition: template
+        value_template: "{{ not in_sleep_mode }}"
     then:
       - parallel:
-          - service: light.turn_off
+          - action: light.turn_off
+            continue_on_error: true
             data:
-              transition: 4
-            target: !input light_target
-          - service: light.turn_off
-            data:
-              transition: 4
+              transition: "{{ fade_time }}"
             target:
-              entity_id: "{{adaptive_lighting_lights}}"
-          - service: switch.turn_off
-            target: !input switch_target
-      - delay:
-          hours: 0
-          minutes: 0
-          seconds: 5
-          milliseconds: 0
+              entity_id: "{{ available_lights }}"
+          - if:
+              - condition: template
+                value_template: "{{ has_switches }}"
+            then:
+              - action: switch.turn_off
+                continue_on_error: true
+                target: !input switch_target
     else:
-      - service: switch.turn_off
+      # Stop Adaptive Lighting from adapting the lights while they are primed.
+      - action: switch.turn_off
         target:
-          entity_id: !input adaptive_lighting_config
+          entity_id: "{{ adaptive_lighting_switch }}"
       - parallel:
-          - service: light.turn_off
-            data:
-              transition: 4
-            target: !input light_target
-          - service: switch.turn_off
-            data: {}
-            target: !input switch_target
-          - service: light.turn_off
-            data:
-              transition: 4
-            target:
-              entity_id: "{{adaptive_lighting_lights}}"
-
+          - alias: Fade lights that are on to the sleep color
+            if:
+              - condition: template
+                value_template: "{{ lights_on | length > 0 }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                data: "{{ dict(sleep_color, brightness=1, transition=fade_time) }}"
+                target:
+                  entity_id: "{{ lights_on }}"
+          - alias: Prime lights that are off with the sleep color
+            if:
+              - condition: template
+                value_template: "{{ lights_off | length > 0 }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                data: "{{ dict(sleep_color, brightness=1, transition=0) }}"
+                target:
+                  entity_id: "{{ lights_off }}"
+          - if:
+              - condition: template
+                value_template: "{{ has_switches }}"
+            then:
+              - action: switch.turn_off
+                continue_on_error: true
+                target: !input switch_target
+      # Give the lights time to finish the fade and store the sleep color.
       - delay:
-          hours: 0
-          minutes: 0
-          seconds: 5
-          milliseconds: 0
-      - service: light.turn_on
-        data:
-          transition: 0
-          brightness: 1
-          rgb_color: "{{sleep_color}}"
-        target:
-          entity_id: "{{adaptive_lighting_lights}}"
-      # - delay:
-      #     hours: 0
-      #     minutes: 0
-      #     seconds: 2
-      #     milliseconds: 0
-      - service: light.turn_off
+          seconds: "{{ fade_time + 2 }}"
+      - action: light.turn_off
+        continue_on_error: true
         data:
           transition: 1
         target:
-          entity_id: "{{adaptive_lighting_lights}}"
+          entity_id: "{{ available_lights }}"
       - delay:
-          hours: 0
-          minutes: 0
-          seconds: 5
-          milliseconds: 0
-      - service: switch.turn_on
+          seconds: 3
+      - action: switch.turn_on
         target:
-          entity_id: !input adaptive_lighting_sleep
-      - service: switch.turn_on
+          entity_id: "{{ adaptive_lighting_sleep }}"
+      - action: switch.turn_on
         target:
-          entity_id: !input adaptive_lighting_config
+          entity_id: "{{ adaptive_lighting_switch }}"
