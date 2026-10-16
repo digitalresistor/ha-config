@@ -3,6 +3,7 @@ blueprint:
   description: Turn on a light when motion is detected
   domain: automation
   author: Zachary Priddy & Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/motion_activated_lights_always_on.yml
   input:
     motion_entity:
       name: Motion Sensor
@@ -41,46 +42,39 @@ blueprint:
 mode: restart
 max_exceeded: silent
 
-trigger:
-
-  - platform: state
+triggers:
+  - trigger: state
     id: motion_start
     entity_id: !input motion_entity
     to: "on"
-  - platform: state
+  - trigger: state
     id: motion_stop
     entity_id: !input motion_entity
     to: "off"
     for:
       seconds: !input no_motion_wait
 
-action:
-  - choose:
-    - alias: Motion Started
-      conditions:
-        - condition: trigger
-          id:
-            - motion_start
-      sequence:
-        - parallel:
-          - alias: "Turn on Lights"
-            service: light.turn_on
-            target: !input light_target
-          - alias: "Turn on Switches"
-            service: switch.turn_on
-            target: !input switch_target
+variables:
+  light_target: !input light_target
+  switch_target: !input switch_target
+  has_lights: "{{ light_target.values() | select | list | length > 0 }}"
+  has_switches: "{{ switch_target.values() | select | list | length > 0 }}"
 
-    - alias: Motion Stopped
-      conditions:
-        - condition: trigger
-          id:
-            - motion_stop
-      sequence:
-        - parallel:
-          - alias: "Turn off Lights"
-            service: light.turn_off
+actions:
+  - variables:
+      action_service: "{{ 'turn_on' if trigger.id == 'motion_start' else 'turn_off' }}"
+  - parallel:
+      - alias: "Lights"
+        if:
+          - condition: template
+            value_template: "{{ has_lights }}"
+        then:
+          - action: "light.{{ action_service }}"
             target: !input light_target
-          - alias: "Turn off Switches"
-            service: switch.turn_off
+      - alias: "Switches"
+        if:
+          - condition: template
+            value_template: "{{ has_switches }}"
+        then:
+          - action: "switch.{{ action_service }}"
             target: !input switch_target
-
