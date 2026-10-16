@@ -1,6 +1,15 @@
 blueprint:
   name: Motion-activated Lights
-  description: Turn on a light when motion is detected
+  description: >-
+    Turn on lights and switches when motion is detected, and turn them off
+    again once there has been no motion for the wait time. Unlike
+    "Motion-activated Light With Enable Switch and Modes" this always runs,
+    regardless of the home mode or an automation enable switch.
+
+    If an Adaptive Lighting switch is selected, every light configured in that
+    Adaptive Lighting instance is turned on/off by entity id, so Adaptive
+    Lighting can adapt them as they turn on. The Adaptive Lighting instance
+    needs "include_config_in_attributes" enabled so its light list can be read.
   domain: automation
   author: Zachary Priddy & Delta Regeer
   source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/motion_activated_lights_always_on.yml
@@ -11,22 +20,33 @@ blueprint:
         entity:
           domain: binary_sensor
           device_class: motion
+    adaptive_lighting_switch:
+      name: Adaptive Lighting
+      description: >-
+        The main Adaptive Lighting switch for the area (not the sleep mode,
+        adapt color or adapt brightness switch). All of its lights are
+        controlled by this automation.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: adaptive_lighting
     light_target:
-      name: Lights
+      name: Additional Lights
+      description: Lights to control in addition to the Adaptive Lighting lights.
       default: {}
       selector:
         target:
           entity:
-            domain:
-              - light
+            domain: light
     switch_target:
       name: Switches
       default: {}
       selector:
         target:
           entity:
-            domain:
-              - switch
+            domain: switch
     no_motion_wait:
       name: Wait time
       description: Time to leave the light on after last motion is detected.
@@ -55,16 +75,36 @@ triggers:
       seconds: !input no_motion_wait
 
 variables:
+  adaptive_lighting_switch: !input adaptive_lighting_switch
+  adaptive_lighting_lights: >
+    {{ (state_attr(adaptive_lighting_switch, 'configuration') or {}).get('lights', [])
+       if adaptive_lighting_switch else [] }}
   light_target: !input light_target
   switch_target: !input switch_target
   has_lights: "{{ light_target.values() | select | list | length > 0 }}"
   has_switches: "{{ switch_target.values() | select | list | length > 0 }}"
 
 actions:
+  - if:
+      - condition: template
+        value_template: "{{ adaptive_lighting_switch and not adaptive_lighting_lights }}"
+    then:
+      - stop: >-
+          No lights found on the Adaptive Lighting switch, make sure it is the
+          main switch and include_config_in_attributes is enabled.
+        error: true
   - variables:
       action_service: "{{ 'turn_on' if trigger.id == 'motion_start' else 'turn_off' }}"
   - parallel:
-      - alias: "Lights"
+      - alias: "Adaptive Lighting Lights"
+        if:
+          - condition: template
+            value_template: "{{ adaptive_lighting_lights | length > 0 }}"
+        then:
+          - action: "light.{{ action_service }}"
+            target:
+              entity_id: "{{ adaptive_lighting_lights }}"
+      - alias: "Additional Lights"
         if:
           - condition: template
             value_template: "{{ has_lights }}"
