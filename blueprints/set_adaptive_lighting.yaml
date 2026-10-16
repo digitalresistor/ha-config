@@ -1,0 +1,179 @@
+blueprint:
+  name: Set Adaptive Lighting
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/set_adaptive_lighting.yaml
+  author: Delta Regeer
+  description: >-
+    Apply the same settings to Adaptive Lighting instances so every area
+    targets the same colors and brightness.
+
+    Settings changed with adaptive_lighting.change_switch_settings do not
+    survive a restart, so run this script on Home Assistant start.
+
+    Some settings are always set because other blueprints depend on them:
+    include_config_in_attributes (the motion and make_it_dark blueprints read
+    the light list from it), intercept and multi_light_intercept (so
+    Adaptive Lighting adapts lights as they turn on).
+  domain: script
+  input:
+    adaptive_lighting_switches:
+      name: Adaptive Lighting
+      description: >-
+        The main Adaptive Lighting switches to update. Leave empty to update
+        every Adaptive Lighting instance.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: switch
+            integration: adaptive_lighting
+    min_brightness:
+      name: Minimum brightness
+      default: 70
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    max_brightness:
+      name: Maximum brightness
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    min_color_temp:
+      name: Warmest color temperature
+      default: 2800
+      selector:
+        number:
+          min: 1000
+          max: 10000
+          step: 50
+          unit_of_measurement: K
+    max_color_temp:
+      name: Coolest color temperature
+      default: 6600
+      selector:
+        number:
+          min: 1000
+          max: 10000
+          step: 50
+          unit_of_measurement: K
+    sunset_offset:
+      name: Sunset offset
+      description: Shift sunset by this many seconds (positive is later).
+      default: 6000
+      selector:
+        number:
+          min: -21600
+          max: 21600
+          unit_of_measurement: seconds
+          mode: box
+    sleep_brightness:
+      name: Sleep brightness
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    sleep_rgb_color:
+      name: Sleep color
+      default: [255, 38, 0]
+      selector:
+        color_rgb:
+    transition:
+      name: Transition
+      default: 4
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: seconds
+    initial_transition:
+      name: Initial transition
+      description: Transition when a light turns on.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: seconds
+    sleep_transition:
+      name: Sleep transition
+      description: Transition when sleep mode is toggled.
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: seconds
+    take_over_control:
+      name: Take over control
+      description: Stop adapting a light after it is changed manually, until it is turned off.
+      default: false
+      selector:
+        boolean:
+    detect_non_ha_changes:
+      name: Detect non-HA changes
+      description: >-
+        Detect changes made outside Home Assistant (Hue app, HomeKit). Can mark
+        Hue lights as manually controlled when they are not.
+      default: false
+      selector:
+        boolean:
+    adapt_only_on_bare_turn_on:
+      name: Adapt only on bare turn on
+      description: >-
+        Only adapt lights when turned on without a color or brightness, so
+        scenes and remotes that set their own keep it.
+      default: true
+      selector:
+        boolean:
+
+mode: restart
+icon: mdi:theme-light-dark
+
+sequence:
+  - variables:
+      adaptive_lighting_switches: !input adaptive_lighting_switches
+      switches: >-
+        {{ (adaptive_lighting_switches or integration_entities('adaptive_lighting'))
+           | select('match', 'switch\.') | list }}
+  - repeat:
+      for_each: "{{ switches }}"
+      sequence:
+        # Only the main switch of an instance has manual_control, the sleep
+        # mode/adapt color/adapt brightness switches do not.
+        - if:
+            - condition: template
+              value_template: "{{ state_attr(repeat.item, 'manual_control') is not none }}"
+          then:
+            - action: adaptive_lighting.change_switch_settings
+              continue_on_error: true
+              data:
+                entity_id: "{{ repeat.item }}"
+                use_defaults: current
+                min_brightness: !input min_brightness
+                max_brightness: !input max_brightness
+                min_color_temp: !input min_color_temp
+                max_color_temp: !input max_color_temp
+                sunset_offset: !input sunset_offset
+                sleep_brightness: !input sleep_brightness
+                sleep_rgb_or_color_temp: rgb_color
+                sleep_rgb_color: !input sleep_rgb_color
+                transition: !input transition
+                initial_transition: !input initial_transition
+                sleep_transition: !input sleep_transition
+                take_over_control: !input take_over_control
+                detect_non_ha_changes: !input detect_non_ha_changes
+                adapt_only_on_bare_turn_on: !input adapt_only_on_bare_turn_on
+                adapt_delay: 0
+                include_config_in_attributes: true
+                intercept: true
+                multi_light_intercept: true
+                separate_turn_on_commands: false
+                send_split_delay: 0
+                skip_redundant_commands: true
