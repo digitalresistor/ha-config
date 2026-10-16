@@ -146,6 +146,10 @@ triggers:
   - trigger: homeassistant
     id: start
     event: start
+  # Reloading automations (which saving one does) cancels a pending turn off.
+  - trigger: event
+    id: start
+    event_type: automation_reloaded
 
 variables:
   motion_entities: !input motion_entities
@@ -167,14 +171,18 @@ variables:
 conditions:
   - condition: template
     value_template: "{{ not automation_enabled or is_state(automation_enabled, 'on') }}"
-  # A door event is an open, or a close from open. Sensors coming back from
-  # unavailable/unknown as closed are not.
+  # A door event is a door opening, or closing after being open. Sensors
+  # coming back from unavailable/unknown as closed are not. Covers only count
+  # when they move (opening/closing): a garage door opener that reconnects
+  # reports open/closed directly while it syncs.
   - condition: template
     value_template: >-
+      {% set from = trigger.from_state.state if trigger.from_state else 'unknown' %}
+      {% set to = trigger.to_state.state if trigger.to_state else 'unknown' %}
       {{ trigger.id != 'door'
-         or trigger.to_state.state in open_states
-         or (trigger.from_state.state in open_states
-             and trigger.to_state.state not in ['unavailable', 'unknown']) }}
+         or (to in ['opening', 'closing'] if trigger.entity_id.startswith('cover.')
+             else (to in open_states
+                   or (from in open_states and to not in ['unavailable', 'unknown']))) }}
 
 actions:
   - if:
