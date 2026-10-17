@@ -1,0 +1,428 @@
+blueprint:
+  name: Away Mode
+  description: >-
+    Switch the house mode to Away when everyone has left, and back to Home
+    when someone arrives.
+
+
+    When the last person with a location leaves, the house is watched for a
+    while. If nothing moves, the mode switches to Away. If something does,
+    or a guest or partner toggle is on (someone without a location is home),
+    the mode stays as it is and a push notification asks what is going on,
+    with buttons to turn a toggle on or to go Away anyway.
+
+
+    While someone without a location is thought to be home, a house that has
+    been quiet for a long time triggers another question, and if that goes
+    unanswered while the house stays quiet, the toggles are turned off and
+    the mode switches to Away.
+
+
+    Turning a toggle on (or tapping its button) while Away switches back to
+    Home.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/away_mode.yml
+  input:
+    people:
+      name: People
+      description: People with a location. The house is empty when none of them is home.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: person
+    guest_mode:
+      name: Guest toggle
+      description: On while a guest without a location is staying.
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    partner_mode:
+      name: Partner toggle
+      description: On while a partner without a location is here.
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    mode_entity:
+      name: Mode
+      selector:
+        entity:
+          filter:
+            domain: input_select
+    away_option:
+      name: Away option
+      default: Away
+      selector:
+        text:
+    home_option:
+      name: Home option
+      default: Home
+      selector:
+        text:
+    paused_modes:
+      name: Paused modes
+      description: Modes in which this automation never changes the mode.
+      default:
+        - No Automation
+      selector:
+        text:
+          multiple: true
+    motion_entities:
+      name: Motion sensors
+      description: >-
+        Motion and mmWave sensors inside the house. Leave out the ones on the
+        way out (garage). They are ignored while a vacuum is cleaning.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+    presence_entities:
+      name: Presence sensors
+      description: >-
+        Sensors a vacuum cannot set off, such as bed sensors. These count even
+        while a vacuum is cleaning.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+    vacuums:
+      name: Vacuums
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: vacuum
+    notify_action:
+      name: Notify action
+      description: Notify action to send questions to, for example notify.mobile_app_phone.
+      selector:
+        text:
+    departure_grace:
+      name: Departure grace
+      description: Activity this soon after leaving is you leaving.
+      default: 180
+      selector:
+        number:
+          min: 0
+          max: 900
+          unit_of_measurement: seconds
+    departure_watch:
+      name: Departure watch
+      description: How long after leaving the house has to stay quiet to switch to Away.
+      default: 900
+      selector:
+        number:
+          min: 60
+          max: 3600
+          unit_of_measurement: seconds
+    quiet_ask:
+      name: Quiet time before asking
+      description: >-
+        How long the house has to be quiet, while someone without a location
+        is thought to be home, before asking whether they left.
+      default: 10800
+      selector:
+        number:
+          min: 600
+          max: 86400
+          unit_of_measurement: seconds
+    quiet_reset:
+      name: Quiet time before going Away
+      description: How long after that question, unanswered and still quiet, to switch to Away.
+      default: 3600
+      selector:
+        number:
+          min: 300
+          max: 86400
+          unit_of_measurement: seconds
+
+# Every trigger restarts the run, which works out from the current state what
+# to watch for next. Turning a toggle on or off from here also restarts it.
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    id: left
+    entity_id: !input people
+    from: home
+    not_to:
+      - unknown
+      - unavailable
+  - trigger: state
+    id: arrived
+    entity_id: !input people
+    to: home
+    not_from:
+      - unknown
+      - unavailable
+  - trigger: state
+    id: company_on
+    entity_id:
+      - !input guest_mode
+      - !input partner_mode
+    to: "on"
+  - trigger: state
+    id: company_off
+    entity_id:
+      - !input guest_mode
+      - !input partner_mode
+    to: "off"
+  - trigger: event
+    id: guest
+    event_type: mobile_app_notification_action
+    event_data:
+      action: AWAY_GUEST
+  - trigger: event
+    id: partner
+    event_type: mobile_app_notification_action
+    event_data:
+      action: AWAY_PARTNER
+  - trigger: event
+    id: go_away
+    event_type: mobile_app_notification_action
+    event_data:
+      action: AWAY_GO
+  - trigger: event
+    id: still_here
+    event_type: mobile_app_notification_action
+    event_data:
+      action: AWAY_STILL_HERE
+  # A restart or reload cancels a running watch, so start it again.
+  - trigger: homeassistant
+    id: start
+    event: start
+  - trigger: event
+    id: start
+    event_type: automation_reloaded
+
+variables:
+  people: !input people
+  guest_mode: !input guest_mode
+  partner_mode: !input partner_mode
+  mode_entity: !input mode_entity
+  away_option: !input away_option
+  home_option: !input home_option
+  paused_modes: !input paused_modes
+  motion_entities: !input motion_entities
+  presence_entities: !input presence_entities
+  vacuums: !input vacuums
+  notify_action: !input notify_action
+  departure_grace: !input departure_grace
+  departure_watch: !input departure_watch
+  quiet_ask: !input quiet_ask
+  quiet_reset: !input quiet_reset
+  tag: away_mode
+  company_actions:
+    - action: AWAY_GUEST
+      title: Guest is here
+    - action: AWAY_PARTNER
+      title: Partner is here
+
+actions:
+  - variables:
+      anyone_home: "{{ people | select('is_state', 'home') | list | length > 0 }}"
+      company: "{{ [guest_mode, partner_mode] | select('is_state', 'on') | list | length > 0 }}"
+
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: arrived
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ is_state(mode_entity, away_option) }}"
+            then:
+              - action: input_select.select_option
+                target:
+                  entity_id: "{{ mode_entity }}"
+                data:
+                  option: "{{ home_option }}"
+          - &clear
+            if:
+              - condition: template
+                value_template: "{{ notify_action.startswith('notify.mobile_app_') }}"
+            then:
+              - action: "{{ notify_action }}"
+                continue_on_error: true
+                data:
+                  message: clear_notification
+                  data:
+                    tag: "{{ tag }}"
+          - stop: Someone is home
+
+      # Someone without a location is home. A toggle turned on here restarts
+      # the run as company_on, which ends up doing the same.
+      - conditions:
+          - condition: trigger
+            id:
+              - company_on
+              - guest
+              - partner
+        sequence:
+          - if:
+              - condition: trigger
+                id:
+                  - guest
+                  - partner
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ guest_mode if trigger.id == 'guest' else partner_mode }}"
+          - if:
+              - condition: template
+                value_template: "{{ is_state(mode_entity, away_option) }}"
+            then:
+              - action: input_select.select_option
+                target:
+                  entity_id: "{{ mode_entity }}"
+                data:
+                  option: "{{ home_option }}"
+          - *clear
+          - if:
+              - condition: template
+                value_template: "{{ anyone_home }}"
+            then:
+              - stop: Someone is home
+
+      # Away first: turning the toggles off restarts the run, which then
+      # finds the mode already Away.
+      - conditions:
+          - condition: trigger
+            id: go_away
+        sequence:
+          - condition: template
+            value_template: "{{ not anyone_home and not is_state(mode_entity, away_option) }}"
+          - action: input_select.select_option
+            target:
+              entity_id: "{{ mode_entity }}"
+            data:
+              option: "{{ away_option }}"
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - "{{ guest_mode }}"
+                - "{{ partner_mode }}"
+          - stop: Away
+
+  # Nobody with a location is home: watch the house.
+  - condition: template
+    value_template: >-
+      {{ not anyone_home
+         and states(mode_entity) not in paused_modes
+         and not is_state(mode_entity, away_option) }}
+
+  - if:
+      - condition: template
+        value_template: "{{ company and trigger.id == 'left' }}"
+    then:
+      - action: "{{ notify_action }}"
+        data:
+          title: Away Mode
+          message: >-
+            {% set on = [guest_mode, partner_mode] | select('is_state', 'on') | list %}
+            You left while {{ on | map('state_attr', 'friendly_name') | join(' and ') }}
+            {{ 'are' if on | length > 1 else 'is' }} on. Did they leave with you?
+          data:
+            tag: "{{ tag }}"
+            actions:
+              - action: AWAY_GO
+                title: They left with me
+              - action: AWAY_STILL_HERE
+                title: They're still here
+
+  - if:
+      - condition: template
+        value_template: "{{ not company and trigger.id in ['left', 'company_off', 'start'] }}"
+    then:
+      # Activity from you leaving has died down by the end of the grace time.
+      - delay:
+          seconds: "{{ departure_grace }}"
+      - wait_template: &activity >-
+          {% set cleaning = expand(vacuums) | selectattr('state', 'in', ['cleaning', 'returning']) | list | length > 0 %}
+          {{ expand(presence_entities) | selectattr('state', 'eq', 'on') | list | length > 0
+             or (not cleaning and expand(motion_entities) | selectattr('state', 'eq', 'on') | list | length > 0) }}
+        timeout:
+          seconds: "{{ [departure_watch - departure_grace, 1] | max }}"
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          - action: input_select.select_option
+            target:
+              entity_id: "{{ mode_entity }}"
+            data:
+              option: "{{ away_option }}"
+          - stop: House is empty
+      - variables:
+          active_areas: >-
+            {% set cleaning = expand(vacuums) | selectattr('state', 'in', ['cleaning', 'returning']) | list | length > 0 %}
+            {% set active = expand(presence_entities) | selectattr('state', 'eq', 'on') | map(attribute='entity_id') | list
+               + ([] if cleaning else expand(motion_entities) | selectattr('state', 'eq', 'on') | map(attribute='entity_id') | list) %}
+            {{ active | map('area_name') | reject('none') | unique | join(', ') or 'the house' }}
+      - action: "{{ notify_action }}"
+        data:
+          title: Away Mode
+          message: You left, but there's activity in {{ active_areas }}. Is someone still home?
+          data:
+            tag: "{{ tag }}"
+            actions: "{{ company_actions + [{'action': 'AWAY_GO', 'title': 'Nobody, go Away'}] }}"
+
+  # Someone may still be home. Each time the house goes quiet, start timing;
+  # any activity starts it over.
+  - repeat:
+      while:
+        - condition: template
+          value_template: "{{ true }}"
+      sequence:
+        - wait_template: >-
+            {% set cleaning = expand(vacuums) | selectattr('state', 'in', ['cleaning', 'returning']) | list | length > 0 %}
+            {{ not (expand(presence_entities) | selectattr('state', 'eq', 'on') | list | length > 0
+               or (not cleaning and expand(motion_entities) | selectattr('state', 'eq', 'on') | list | length > 0)) }}
+        - wait_template: *activity
+          timeout:
+            seconds: "{{ quiet_ask }}"
+        - if:
+            - condition: template
+              value_template: "{{ not wait.completed }}"
+          then:
+            - action: "{{ notify_action }}"
+              data:
+                title: Away Mode
+                message: >-
+                  No activity at home for {{ (quiet_ask / 3600) | round(1) | string | replace('.0', '') }}
+                  hours. Is anyone still there?
+                data:
+                  tag: "{{ tag }}"
+                  actions:
+                    - action: AWAY_GO
+                      title: Nobody, go Away
+                    - action: AWAY_STILL_HERE
+                      title: Someone's still here
+            - wait_template: *activity
+              timeout:
+                seconds: "{{ quiet_reset }}"
+            # Away first: turning the toggles off restarts the run.
+            - if:
+                - condition: template
+                  value_template: "{{ not wait.completed }}"
+              then:
+                - action: input_select.select_option
+                  target:
+                    entity_id: "{{ mode_entity }}"
+                  data:
+                    option: "{{ away_option }}"
+                - action: input_boolean.turn_off
+                  target:
+                    entity_id:
+                      - "{{ guest_mode }}"
+                      - "{{ partner_mode }}"
+                - stop: House has been quiet
