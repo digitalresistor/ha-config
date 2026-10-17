@@ -6,6 +6,9 @@ blueprint:
     "Motion-activated Light With Enable Switch and Modes" this always runs,
     regardless of the home mode or an automation enable switch.
 
+    Entities in "Keep on while" hold the lights on while any of them is on,
+    for times the motion sensor cannot see someone, such as a shower.
+
     If an Adaptive Lighting switch is selected, every light configured in that
     Adaptive Lighting instance is turned on/off by entity id, so Adaptive
     Lighting can adapt them as they turn on. The Adaptive Lighting instance
@@ -47,6 +50,19 @@ blueprint:
         target:
           entity:
             domain: switch
+    hold_entities:
+      name: Keep on while
+      description: >-
+        Binary sensors or toggles that keep the lights on while any of them is
+        on, for times the motion sensor cannot see someone (for example a
+        shower). The wait time starts once they are all off.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: binary_sensor
+            - domain: input_boolean
     no_motion_wait:
       name: Wait time
       description: Time to leave the light on after last motion is detected.
@@ -73,8 +89,19 @@ triggers:
     to: "off"
     for:
       seconds: !input no_motion_wait
+  # Nothing is keeping the lights on any more. Never fires without hold
+  # entities, as the template is then always true.
+  - trigger: template
+    id: hold_end
+    value_template: "{{ hold_entities | select('is_state', 'on') | list | length == 0 }}"
+    for:
+      seconds: !input no_motion_wait
+
+trigger_variables:
+  hold_entities: !input hold_entities
 
 variables:
+  motion_entity: !input motion_entity
   adaptive_lighting_switch: !input adaptive_lighting_switch
   adaptive_lighting_lights: >
     {{ (state_attr(adaptive_lighting_switch, 'configuration') or {}).get('lights', [])
@@ -85,6 +112,15 @@ variables:
   has_switches: "{{ switch_target.values() | select | list | length > 0 }}"
 
 actions:
+  # Turning off waits for both motion and the hold entities to be clear.
+  - if:
+      - condition: template
+        value_template: >-
+          {{ trigger.id != 'motion_start'
+             and (hold_entities | select('is_state', 'on') | list | length > 0
+                  or is_state(motion_entity, 'on')) }}
+    then:
+      - stop: Someone is still there
   - if:
       - condition: template
         value_template: "{{ adaptive_lighting_switch and not adaptive_lighting_lights }}"
