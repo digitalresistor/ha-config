@@ -1,0 +1,185 @@
+blueprint:
+  name: Entry Light
+  description: >-
+    Turn on an entry light when someone comes through a locked door.
+
+    The light turns on when the door opens while its lock is unlocked (only
+    after dark if "Only after dark" is on), and when the lock is unlocked
+    shortly after someone arrived home while the house is dark, so the light
+    is already on as the door opens. It turns off once the door and lock have
+    been left alone for the on time.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/entry_light.yml
+  input:
+    door:
+      name: Door
+      selector:
+        entity:
+          filter:
+            domain: binary_sensor
+            device_class:
+              - door
+              - opening
+    lock:
+      name: Lock
+      selector:
+        entity:
+          filter:
+            domain: lock
+    light_target:
+      name: Lights
+      default: {}
+      selector:
+        target:
+          entity:
+            domain: light
+    switch_target:
+      name: Switches
+      default: {}
+      selector:
+        target:
+          entity:
+            domain: switch
+    only_after_dark:
+      name: Only after dark
+      description: Only turn the light on for the door opening while the sun is below the horizon.
+      default: true
+      selector:
+        boolean:
+    persons:
+      name: People
+      description: People whose arrival home turns the light on when the lock is unlocked.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: person
+    arrival_window:
+      name: Arrival window
+      description: How recently someone has to have arrived home for an unlock to count as them coming in.
+      default: 600
+      selector:
+        number:
+          min: 60
+          max: 3600
+          unit_of_measurement: seconds
+    house_lights:
+      name: House lights
+      description: >-
+        If any of these is on, the house is not dark and an arrival does not
+        turn the light on.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: light
+            - domain: switch
+    on_time:
+      name: On time
+      description: Time to leave the light on after the door or lock was last used.
+      default: 300
+      selector:
+        number:
+          min: 30
+          max: 3600
+          unit_of_measurement: seconds
+
+# Every door or lock change restarts the run, which works out from the last
+# door/lock activity when the light has to turn off.
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    id: open
+    entity_id: !input door
+    to: "on"
+  - trigger: state
+    id: close
+    entity_id: !input door
+    to: "off"
+  - trigger: state
+    id: unlock
+    entity_id: !input lock
+    to: unlocked
+  - trigger: state
+    id: lock
+    entity_id: !input lock
+    to: locked
+  # A restart or reload cancels a pending turn off.
+  - trigger: homeassistant
+    id: start
+    event: start
+  - trigger: event
+    id: start
+    event_type: automation_reloaded
+
+variables:
+  door: !input door
+  lock: !input lock
+  only_after_dark: !input only_after_dark
+  persons: !input persons
+  arrival_window: !input arrival_window
+  house_lights: !input house_lights
+  on_time: !input on_time
+  light_target: !input light_target
+  switch_target: !input switch_target
+  has_lights: "{{ light_target.values() | select | list | length > 0 }}"
+  has_switches: "{{ switch_target.values() | select | list | length > 0 }}"
+  targets: >-
+    {{ (light_target.get('entity_id', []) if light_target.get('entity_id') is not string else [light_target.entity_id])
+       + (switch_target.get('entity_id', []) if switch_target.get('entity_id') is not string else [switch_target.entity_id]) }}
+  sun_down: "{{ is_state('sun.sun', 'below_horizon') }}"
+
+actions:
+  - variables:
+      arrived: >-
+        {{ expand(persons) | selectattr('state', 'eq', 'home')
+           | selectattr('last_changed', 'gt', now() - timedelta(seconds=arrival_window))
+           | list | length > 0 }}
+      house_dark: "{{ sun_down and house_lights | select('is_state', 'on') | list | length == 0 }}"
+      turn_on: >-
+        {{ (trigger.id == 'open' and is_state(lock, 'unlocked') and (sun_down or not only_after_dark))
+           or (trigger.id == 'unlock' and arrived and house_dark) }}
+
+  - if:
+      - condition: template
+        value_template: "{{ turn_on }}"
+    then:
+      - parallel:
+          - if:
+              - condition: template
+                value_template: "{{ has_lights }}"
+            then:
+              - action: light.turn_on
+                target: !input light_target
+          - if:
+              - condition: template
+                value_template: "{{ has_switches }}"
+            then:
+              - action: switch.turn_on
+                target: !input switch_target
+
+  # Only time a light that is on.
+  - condition: template
+    value_template: "{{ targets | select('is_state', 'on') | list | length > 0 }}"
+  - variables:
+      deadline: "{{ ([states[door].last_changed, states[lock].last_changed] | max | as_timestamp) + on_time }}"
+  - delay:
+      seconds: "{{ [deadline - now().timestamp(), 0] | max | round(0) }}"
+  - parallel:
+      - if:
+          - condition: template
+            value_template: "{{ has_lights }}"
+        then:
+          - action: light.turn_off
+            target: !input light_target
+      - if:
+          - condition: template
+            value_template: "{{ has_switches }}"
+        then:
+          - action: switch.turn_off
+            target: !input switch_target
