@@ -221,6 +221,12 @@ actions:
   - action: light.turn_off
     target:
       entity_id: "{{ light }}"
+  # Only release Adaptive Lighting once the light reports off; a light still
+  # reporting on would be adapted and turned straight back on.
+  - wait_template: "{{ not is_state(light, 'on') }}"
+    timeout: 10
+  - delay:
+      seconds: 1
   - if:
       - condition: template
         value_template: "{{ adaptive_lighting_switch != '' }}"
