@@ -10,7 +10,8 @@ blueprint:
     side only counts as someone asleep once it has been occupied for the
     minimum time in bed. The light follows the bed while it is on (someone
     else getting up, or coming back), and turns off once everyone who got up
-    is back in bed, when the night mode ends, or after the maximum time.
+    is back in bed or after the maximum time. When the night mode ends it is
+    left as it is for whatever takes over, such as a good morning routine.
 
     If an Adaptive Lighting switch is selected, the light is marked as manually
     controlled while it is on so Adaptive Lighting does not change its color or
@@ -207,8 +208,12 @@ actions:
             seconds: "{{ [max_on_time - (now().timestamp() - started), 0] | max | round(0) }}"
           continue_on_timeout: true
         # Let the bed settle so someone shifting around is ignored.
-        - delay:
-            seconds: !input settle_time
+        - if:
+            - condition: template
+              value_template: "{{ states('input_select.mode') in night_modes }}"
+          then:
+            - delay:
+                seconds: !input settle_time
         - variables:
             done: >-
               {{ not wait.completed
@@ -218,15 +223,22 @@ actions:
         - condition: template
           value_template: "{{ done }}"
 
-  - action: light.turn_off
-    target:
-      entity_id: "{{ light }}"
-  # Only release Adaptive Lighting once the light reports off; a light still
-  # reporting on would be adapted and turned straight back on.
-  - wait_template: "{{ not is_state(light, 'on') }}"
-    timeout: 10
-  - delay:
-      seconds: 1
+  # Once the night mode has ended the light is left as it is for whatever
+  # takes over (a good morning routine, Adaptive Lighting); it is only handed
+  # back to Adaptive Lighting below.
+  - if:
+      - condition: template
+        value_template: "{{ states('input_select.mode') in night_modes }}"
+    then:
+      - action: light.turn_off
+        target:
+          entity_id: "{{ light }}"
+      # Only release Adaptive Lighting once the light reports off; a light
+      # still reporting on would be adapted and turned straight back on.
+      - wait_template: "{{ not is_state(light, 'on') }}"
+        timeout: 10
+      - delay:
+          seconds: 1
   - if:
       - condition: template
         value_template: "{{ adaptive_lighting_switch != '' }}"
