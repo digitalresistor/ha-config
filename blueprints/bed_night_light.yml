@@ -5,11 +5,12 @@ blueprint:
     again once they are back in bed.
 
     In a night mode, when one side of the bed becomes empty the light turns on
-    in a dim color: at the shared brightness while someone is still in bed (so
-    they are not woken up), at the alone brightness when nobody is in bed. It
-    follows the bed while it is on (someone else getting up, or coming back),
-    and turns off once everyone who got up is back in bed, when the night mode
-    ends, or after the maximum time.
+    in a dim color: at the shared brightness while someone else is still
+    asleep (so they are not woken up), at the alone brightness otherwise. A
+    side only counts as someone asleep once it has been occupied for the
+    minimum time in bed. The light follows the bed while it is on (someone
+    else getting up, or coming back), and turns off once everyone who got up
+    is back in bed, when the night mode ends, or after the maximum time.
 
     If an Adaptive Lighting switch is selected, the light is marked as manually
     controlled while it is on so Adaptive Lighting does not change its color or
@@ -78,6 +79,18 @@ blueprint:
           min: 0
           max: 60
           unit_of_measurement: seconds
+    min_in_bed_time:
+      name: Minimum time in bed
+      description: >-
+        A side only counts as someone sleeping there once it has been occupied
+        this long, so one person rolling over or lying across the middle is
+        not mistaken for a second sleeper.
+      default: 600
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: seconds
     max_on_time:
       name: Maximum on time
       default: 1800
@@ -123,6 +136,7 @@ variables:
   brightness_alone: !input brightness_alone
   brightness_shared: !input brightness_shared
   max_on_time: !input max_on_time
+  min_in_bed_time: !input min_in_bed_time
   adaptive_lighting_switch: !input adaptive_lighting_switch
 
 conditions:
@@ -143,11 +157,15 @@ actions:
               entity_id: "{{ light }}"
       - stop: Cleaned up after restart or reload
 
-  # Everyone in bed when the trip started (including whoever just got up) has
-  # to be back in bed before the light turns off.
+  # Whoever just got up, plus everyone who had been in bed for the minimum
+  # time, has to be back in bed before the light turns off.
   - variables:
       started: "{{ now().timestamp() }}"
-      sleepers: "{{ (bed_sides | select('is_state', 'on') | list + [trigger.entity_id]) | unique | list }}"
+      sleepers: >-
+        {{ ([trigger.entity_id] + (expand(bed_sides)
+             | selectattr('state', 'eq', 'on')
+             | selectattr('last_changed', 'lt', now() - timedelta(seconds=min_in_bed_time))
+             | map(attribute='entity_id') | list)) | unique | list }}
       brightness: 0
       done: false
   - if:
@@ -164,7 +182,9 @@ actions:
   - repeat:
       sequence:
         - variables:
-            in_bed: "{{ bed_sides | select('is_state', 'on') | list }}"
+            # Only sleepers count, so someone stirring is not taken for a
+            # second person still asleep.
+            in_bed: "{{ sleepers | select('is_state', 'on') | list }}"
             wanted: "{{ brightness_shared if in_bed else brightness_alone }}"
         - if:
             - condition: template
@@ -181,7 +201,7 @@ actions:
         # Turning a light on can take a while; a wait_template also catches
         # changes to the bed that happened in the meantime.
         - wait_template: >-
-            {{ bed_sides | select('is_state', 'on') | list != in_bed
+            {{ sleepers | select('is_state', 'on') | list != in_bed
                or states('input_select.mode') not in night_modes }}
           timeout:
             seconds: "{{ [max_on_time - (now().timestamp() - started), 0] | max | round(0) }}"
