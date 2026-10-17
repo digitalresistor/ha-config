@@ -124,9 +124,28 @@ actions:
           - condition: template
             value_template: "{{ adaptive_lighting_lights | length > 0 }}"
         then:
-          - action: "light.{{ action_service }}"
-            target:
-              entity_id: "{{ adaptive_lighting_lights }}"
+          # Adaptive Lighting turns on the lights that are off itself, so they come
+          # on at its brightness and color rather than their last state, and are not
+          # taken as manually controlled.
+          - if:
+              - condition: template
+                value_template: "{{ action_service == 'turn_on' and is_state(adaptive_lighting_switch, 'on') }}"
+            then:
+              - variables:
+                  lights_off: "{{ adaptive_lighting_lights | select('is_state', 'off') | list }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ lights_off | length > 0 }}"
+                then:
+                  - action: adaptive_lighting.apply
+                    data:
+                      entity_id: "{{ adaptive_lighting_switch }}"
+                      lights: "{{ lights_off }}"
+                      turn_on_lights: true
+            else:
+              - action: "light.{{ action_service }}"
+                target:
+                  entity_id: "{{ adaptive_lighting_lights }}"
       - alias: "Additional Lights"
         if:
           - condition: template
