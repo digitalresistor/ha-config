@@ -154,8 +154,9 @@ actions:
           lights: "{{ lights }}"
           manual_control: true
 
-  # Hue's long flash pulses for about 15 seconds; re-assert the color each
-  # round in case something else (motion, Adaptive Lighting) changed it.
+  # Pulse between full and dim, about once a second. Driven from here rather
+  # than a light's built-in flash effect (Hue's runs for 15 s and cannot be
+  # cancelled), so it stops within a second of the kettle being lifted.
   - repeat:
       until:
         - condition: template
@@ -168,15 +169,23 @@ actions:
           data:
             rgb_color: "{{ color }}"
             brightness_pct: "{{ brightness }}"
-            transition: 0
-        - action: light.turn_on
-          continue_on_error: true
-          target:
-            entity_id: "{{ lights }}"
-          data:
-            flash: long
+            transition: 0.3
         - wait_template: "{{ is_state(on_base, 'off') or is_state(power_entity, 'off') }}"
-          timeout: 15
+          timeout: 0.6
+        - if:
+            - condition: template
+              value_template: "{{ not wait.completed }}"
+          then:
+            - action: light.turn_on
+              continue_on_error: true
+              target:
+                entity_id: "{{ lights }}"
+              data:
+                rgb_color: "{{ color }}"
+                brightness_pct: "{{ [brightness // 5, 1] | max }}"
+                transition: 0.3
+            - wait_template: "{{ is_state(on_base, 'off') or is_state(power_entity, 'off') }}"
+              timeout: 0.6
 
   - action: scene.turn_on
     continue_on_error: true
