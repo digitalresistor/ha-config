@@ -16,6 +16,7 @@ recover cleanly from restarts.
 | [Entry Light](blueprints/entry_light.yml) | automation | Entry light when someone comes in through a locked door, or as soon as they unlock it after arriving home in the dark. |
 | [Bed Night Light](blueprints/bed_night_light.yml) | automation | Dim red light at night when someone gets out of bed, dimmer if someone else is still asleep, off once they are back in bed. Uses per-side bed presence sensors. |
 | [Bathroom Fan](blueprints/bathroom_fan.yml) | automation | Runs the fan for toilet visits and showers (humidity spike) and makes sure it is never left running. |
+| [Kettle Ready Light](blueprints/kettle_ready_light.yml) | automation | Pulses lights red once a kettle reaches its target temperature, until it is lifted off the base; fires once per heating. |
 | [Away Mode](blueprints/away_mode.yml) | automation | Switches the house mode between Home and Away from presence, motion and Guest/Partner toggles, and asks via push notification when it is unsure. |
 | [Make It Dark](blueprints/make_it_dark.yaml) | script | Turns off an Adaptive Lighting area. In Night mode it first primes every light with the sleep color, so lights come back on dim and red instead of bright white. |
 | [Set Adaptive Lighting](blueprints/set_adaptive_lighting.yaml) | script | Applies the same Adaptive Lighting settings to every instance. Run on Home Assistant start, because these settings do not survive a restart. |
@@ -29,7 +30,9 @@ more detail.
   Home, Night, Movie, Away and No Automation. Night is the sleep mode, Away is
   set by the Away Mode blueprint, and No Automation pauses mode changes.
 - **Adaptive Lighting.** Light blueprints can take an Adaptive Lighting switch
-  and turn on every light in that instance *by entity id*. Adaptive Lighting
+  and turn on every light in that instance *by entity id*. Add lights to an
+  instance individually rather than through a light group, so pausing or
+  adapting one light does not turn on the rest of the group. Adaptive Lighting
   only adapts lights that are turned on by entity id, so targeting lights by
   device or area makes them come on in the wrong color. The instances need
   `include_config_in_attributes` enabled so their light list can be read; Set
