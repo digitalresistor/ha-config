@@ -1,0 +1,200 @@
+blueprint:
+  name: Kettle Ready Light
+  description: >-
+    Flash lights when a kettle reaches its target temperature, until the kettle
+    is lifted off its base.
+
+
+    The alert arms when the kettle is turned on. Once the water is at the
+    target temperature the lights pulse in the alert color until the kettle is
+    lifted (or turned off), and then go back to how they were. It fires once
+    per heating: putting the kettle back while it is still on does not start
+    it again; turn the kettle off and on to re-arm.
+
+
+    If the lights are managed by Adaptive Lighting, select its switch so it
+    leaves the lights alone during the alert. The lights need to be in the
+    Adaptive Lighting instance individually, not through a light group.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/kettle_ready_light.yml
+  input:
+    power_entity:
+      name: Kettle power
+      description: Switch (or climate entity) that is on while the kettle is heating or holding.
+      selector:
+        entity:
+          filter:
+            - domain: switch
+            - domain: climate
+    current_temperature:
+      name: Current temperature
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+    target_temperature:
+      name: Target temperature
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: temperature
+    on_base:
+      name: On base
+      description: Binary sensor that is on while the kettle sits on its base.
+      selector:
+        entity:
+          filter:
+            domain: binary_sensor
+    tolerance:
+      name: Tolerance
+      description: How close to the target counts as ready.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 0.5
+          unit_of_measurement: degrees
+    lights:
+      name: Lights
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: light
+    color:
+      name: Alert color
+      default: [255, 0, 0]
+      selector:
+        color_rgb:
+    brightness:
+      name: Alert brightness
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    adaptive_lighting_switch:
+      name: Adaptive Lighting switch
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: adaptive_lighting
+
+# Turning the kettle on (re)arms the alert; the run waits for the target,
+# flashes, restores the lights and ends, so it fires once per heating.
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    id: power_on
+    entity_id: !input power_entity
+    from: "off"
+    not_to:
+      - unknown
+      - unavailable
+  # After a restart or reload, re-arm if the kettle is still heating.
+  - trigger: homeassistant
+    id: start
+    event: start
+  - trigger: event
+    id: start
+    event_type: automation_reloaded
+
+variables:
+  power_entity: !input power_entity
+  current_temperature: !input current_temperature
+  target_temperature: !input target_temperature
+  on_base: !input on_base
+  tolerance: !input tolerance
+  lights: !input lights
+  color: !input color
+  brightness: !input brightness
+  adaptive_lighting_switch: !input adaptive_lighting_switch
+  use_adaptive_lighting: "{{ adaptive_lighting_switch != '' }}"
+  scene_id: "kettle_ready_{{ this.attributes.id | default('light') | string | slugify }}"
+
+actions:
+  - condition: template
+    value_template: >-
+      {{ not is_state(power_entity, 'off')
+         and (trigger.id == 'power_on'
+              or (is_state(on_base, 'on')
+                  and states(current_temperature) | float(0)
+                      < states(target_temperature) | float(0) - tolerance)) }}
+
+  - wait_template: >-
+      {{ is_state(power_entity, 'off')
+         or states(current_temperature) | float(0)
+            >= states(target_temperature) | float(999) - tolerance }}
+  - condition: template
+    value_template: "{{ not is_state(power_entity, 'off') and is_state(on_base, 'on') }}"
+
+  - variables:
+      lights_on_before: "{{ lights | select('is_state', 'on') | list }}"
+  - action: scene.create
+    data:
+      scene_id: "{{ scene_id }}"
+      snapshot_entities: "{{ lights }}"
+  - if:
+      - condition: template
+        value_template: "{{ use_adaptive_lighting }}"
+    then:
+      - action: adaptive_lighting.set_manual_control
+        continue_on_error: true
+        data:
+          entity_id: "{{ adaptive_lighting_switch }}"
+          lights: "{{ lights }}"
+          manual_control: true
+
+  # Hue's long flash pulses for about 15 seconds; re-assert the color each
+  # round in case something else (motion, Adaptive Lighting) changed it.
+  - repeat:
+      until:
+        - condition: template
+          value_template: "{{ is_state(on_base, 'off') or is_state(power_entity, 'off') }}"
+      sequence:
+        - action: light.turn_on
+          continue_on_error: true
+          target:
+            entity_id: "{{ lights }}"
+          data:
+            rgb_color: "{{ color }}"
+            brightness_pct: "{{ brightness }}"
+            transition: 0
+        - action: light.turn_on
+          continue_on_error: true
+          target:
+            entity_id: "{{ lights }}"
+          data:
+            flash: long
+        - wait_template: "{{ is_state(on_base, 'off') or is_state(power_entity, 'off') }}"
+          timeout: 15
+
+  - action: scene.turn_on
+    continue_on_error: true
+    target:
+      entity_id: "scene.{{ scene_id }}"
+  # Only release Adaptive Lighting once the lights report the restored state;
+  # a light still reporting on would be adapted and turned back on.
+  - wait_template: "{{ lights | reject('in', lights_on_before) | select('is_state', 'on') | list | length == 0 }}"
+    timeout: 10
+  - delay:
+      seconds: 1
+  - if:
+      - condition: template
+        value_template: "{{ use_adaptive_lighting }}"
+    then:
+      - action: adaptive_lighting.set_manual_control
+        continue_on_error: true
+        data:
+          entity_id: "{{ adaptive_lighting_switch }}"
+          lights: "{{ lights }}"
+          manual_control: false
