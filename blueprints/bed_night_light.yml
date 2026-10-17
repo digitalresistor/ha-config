@@ -1,0 +1,213 @@
+blueprint:
+  name: Bed Night Light
+  description: >-
+    Light the way when someone gets out of bed at night, and turn the light off
+    again once they are back in bed.
+
+    In a night mode, when one side of the bed becomes empty the light turns on
+    in a dim color: at the shared brightness while someone is still in bed (so
+    they are not woken up), at the alone brightness when nobody is in bed. It
+    follows the bed while it is on (someone else getting up, or coming back),
+    and turns off once everyone who got up is back in bed, when the night mode
+    ends, or after the maximum time.
+
+    If an Adaptive Lighting switch is selected, the light is marked as manually
+    controlled while it is on so Adaptive Lighting does not change its color or
+    brightness, and released again afterwards.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/bed_night_light.yml
+  input:
+    bed_sides:
+      name: Bed sides
+      description: One occupancy sensor per side of the bed (on means someone is lying there).
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+    light:
+      name: Light
+      selector:
+        entity:
+          filter:
+            domain: light
+    night_modes:
+      name: Night modes
+      description: Values of input_select.mode in which this runs.
+      default:
+        - Night
+      selector:
+        select:
+          options:
+            - Home
+            - Away
+            - Night
+            - Movie
+            - No Automation
+          multiple: true
+    color:
+      name: Color
+      default: [255, 0, 0]
+      selector:
+        color_rgb:
+    brightness_alone:
+      name: Brightness when nobody is in bed
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    brightness_shared:
+      name: Brightness while someone is still in bed
+      default: 25
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    settle_time:
+      name: Settle time
+      description: >-
+        How long a side has to stay empty (or occupied) before it counts, to
+        ignore someone shifting around.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: seconds
+    max_on_time:
+      name: Maximum on time
+      default: 1800
+      selector:
+        number:
+          min: 60
+          max: 7200
+          unit_of_measurement: seconds
+    adaptive_lighting_switch:
+      name: Adaptive Lighting
+      description: The main Adaptive Lighting switch that controls the light, if any.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: adaptive_lighting
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    id: out_of_bed
+    entity_id: !input bed_sides
+    from: "on"
+    to: "off"
+    for:
+      seconds: !input settle_time
+  # A restart or reload ends a trip without turning the light off.
+  - trigger: homeassistant
+    id: cleanup
+    event: start
+  - trigger: event
+    id: cleanup
+    event_type: automation_reloaded
+
+variables:
+  bed_sides: !input bed_sides
+  light: !input light
+  night_modes: !input night_modes
+  color: !input color
+  brightness_alone: !input brightness_alone
+  brightness_shared: !input brightness_shared
+  max_on_time: !input max_on_time
+  adaptive_lighting_switch: !input adaptive_lighting_switch
+
+conditions:
+  - condition: template
+    value_template: "{{ states('input_select.mode') in night_modes }}"
+
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ trigger.id == 'cleanup' }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ is_state(light, 'on') }}"
+        then:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ light }}"
+      - stop: Cleaned up after restart or reload
+
+  # Everyone in bed when the trip started (including whoever just got up) has
+  # to be back in bed before the light turns off.
+  - variables:
+      started: "{{ now().timestamp() }}"
+      sleepers: "{{ (bed_sides | select('is_state', 'on') | list + [trigger.entity_id]) | unique | list }}"
+      brightness: 0
+      done: false
+  - if:
+      - condition: template
+        value_template: "{{ adaptive_lighting_switch != '' }}"
+    then:
+      - action: adaptive_lighting.set_manual_control
+        continue_on_error: true
+        data:
+          entity_id: "{{ adaptive_lighting_switch }}"
+          lights: "{{ [light] }}"
+          manual_control: true
+
+  - repeat:
+      sequence:
+        - variables:
+            in_bed: "{{ bed_sides | select('is_state', 'on') | list }}"
+            wanted: "{{ brightness_shared if in_bed else brightness_alone }}"
+        - if:
+            - condition: template
+              value_template: "{{ wanted != brightness }}"
+          then:
+            - action: light.turn_on
+              target:
+                entity_id: "{{ light }}"
+              data:
+                rgb_color: "{{ color }}"
+                brightness_pct: "{{ wanted }}"
+            - variables:
+                brightness: "{{ wanted }}"
+        # Turning a light on can take a while; a wait_template also catches
+        # changes to the bed that happened in the meantime.
+        - wait_template: >-
+            {{ bed_sides | select('is_state', 'on') | list != in_bed
+               or states('input_select.mode') not in night_modes }}
+          timeout:
+            seconds: "{{ [max_on_time - (now().timestamp() - started), 0] | max | round(0) }}"
+          continue_on_timeout: true
+        # Let the bed settle so someone shifting around is ignored.
+        - delay:
+            seconds: !input settle_time
+        - variables:
+            done: >-
+              {{ not wait.completed
+                 or states('input_select.mode') not in night_modes
+                 or sleepers | reject('is_state', 'on') | list | length == 0 }}
+      until:
+        - condition: template
+          value_template: "{{ done }}"
+
+  - action: light.turn_off
+    target:
+      entity_id: "{{ light }}"
+  - if:
+      - condition: template
+        value_template: "{{ adaptive_lighting_switch != '' }}"
+    then:
+      - action: adaptive_lighting.set_manual_control
+        continue_on_error: true
+        data:
+          entity_id: "{{ adaptive_lighting_switch }}"
+          lights: "{{ [light] }}"
+          manual_control: false
