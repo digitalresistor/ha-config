@@ -152,6 +152,9 @@ actions:
                       entity_id: "{{ adaptive_lighting_switch }}"
                       lights: "{{ lights_off }}"
                       turn_on_lights: true
+                      # Without this, apply fades over the regular transition (4 s by
+                      # default) instead of the quicker one meant for lights turning on.
+                      transition: "{{ (state_attr(adaptive_lighting_switch, 'configuration') or {}).get('initial_transition', 1) }}"
             else:
               - action: "light.{{ action_service }}"
                 target:
