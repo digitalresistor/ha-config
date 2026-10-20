@@ -176,4 +176,6 @@ sequence:
                 multi_light_intercept: true
                 separate_turn_on_commands: false
                 send_split_delay: 0
-                skip_redundant_commands: true
+                # Re-send every adaptation, so a light that missed a command is put right on
+                # the next interval.
+                skip_redundant_commands: false
