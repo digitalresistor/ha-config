@@ -158,6 +158,27 @@ actions:
                       # Without this, apply fades over the regular transition (4 s by
                       # default) instead of the quicker one meant for lights turning on.
                       transition: "{{ (state_attr(adaptive_lighting_switch, 'configuration') or {}).get('initial_transition', 1) }}"
+                  # Commands to many lights at once sometimes do not all arrive (some
+                  # stay at their old, dim state). Check and send them again.
+                  - repeat:
+                      count: 2
+                      sequence:
+                        - delay:
+                            seconds: 2
+                        - variables:
+                            missed: >-
+                              {%- set want = (state_attr(adaptive_lighting_switch, 'brightness_pct') | float(100)) * 2.55 -%}{%- set ns = namespace(lights=[]) -%}{%- for light in lights_off -%}{%- if not is_state(light, 'on') or state_attr(light, 'brightness') | float(0) < want * 0.8 -%}{%- set ns.lights = ns.lights + [light] -%}{%- endif -%}{%- endfor -%}{{ ns.lights }}
+                        - if:
+                            - condition: template
+                              value_template: "{{ missed | length > 0 }}"
+                          then:
+                            - action: adaptive_lighting.apply
+                              continue_on_error: true
+                              data:
+                                entity_id: "{{ adaptive_lighting_switch }}"
+                                lights: "{{ missed }}"
+                                turn_on_lights: true
+                                transition: "{{ (state_attr(adaptive_lighting_switch, 'configuration') or {}).get('initial_transition', 1) }}"
             else:
               - action: "light.{{ action_service }}"
                 target:
