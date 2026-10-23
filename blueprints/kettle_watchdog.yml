@@ -1,0 +1,304 @@
+blueprint:
+  name: Kettle Watchdog
+  description: >-
+    Power-cycle a Bluetooth kettle through its smart plug when Home Assistant
+    loses it, without cutting the power while it is heating.
+
+
+    Some kettles (the Fellow Stagg EKG+ among them) stop advertising after
+    their Bluetooth connection drops and only come back once they lose power.
+    When the kettle entity has been unavailable for a while, this watches the
+    plug's power draw first. If the kettle stays idle, the plug is turned off
+    for a few seconds and back on. If the kettle draws power (someone is
+    boiling water, or it is holding temperature), the lights pulse in the
+    alert color instead, until the plug is turned off by hand (turn it back on
+    to reconnect the kettle), the kettle comes back by itself, or the alert
+    times out.
+
+
+    It never power-cycles more than once per cooldown, counted from the last
+    time the plug was switched, by this automation or by hand. While the
+    kettle stays unavailable it checks again every 15 minutes.
+
+
+    If the lights are managed by Adaptive Lighting, select its switch so it
+    leaves the lights alone during the alert. The lights need to be in the
+    Adaptive Lighting instance individually, not through a light group.
+  domain: automation
+  author: Delta Regeer
+  source_url: https://github.com/digitalresistor/ha-config/blob/main/blueprints/kettle_watchdog.yml
+  input:
+    kettle_entity:
+      name: Kettle entity
+      description: An entity of the Bluetooth kettle that becomes unavailable when Home Assistant loses the connection.
+      selector:
+        entity:
+    unreachable_minutes:
+      name: Unavailable for
+      description: How long the kettle has to be unavailable before the plug is power-cycled.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 120
+          unit_of_measurement: minutes
+    plug_switch:
+      name: Kettle plug
+      selector:
+        entity:
+          filter:
+            domain: switch
+    plug_power:
+      name: Kettle plug power
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            device_class: power
+    heating_threshold:
+      name: Heating threshold
+      description: Power draw above which the kettle counts as heating.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 500
+          unit_of_measurement: W
+    watch_minutes:
+      name: Watch before cutting power
+      description: >-
+        How long to watch the power draw before turning the plug off. Long
+        enough to see the heater pulse while the kettle holds temperature.
+      default: 2
+      selector:
+        number:
+          min: 0.5
+          max: 10
+          step: 0.5
+          unit_of_measurement: minutes
+    off_seconds:
+      name: Off time
+      default: 10
+      selector:
+        number:
+          min: 2
+          max: 60
+          unit_of_measurement: seconds
+    cooldown_minutes:
+      name: Cooldown
+      description: Minimum time between power cycles, counted from the last time the plug was switched.
+      default: 60
+      selector:
+        number:
+          min: 5
+          max: 1440
+          unit_of_measurement: minutes
+    lights:
+      name: Lights
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: light
+    color:
+      name: Alert color
+      default: [255, 100, 0]
+      selector:
+        color_rgb:
+    brightness:
+      name: Alert brightness
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    alert_minutes:
+      name: Alert timeout
+      description: >-
+        Stop pulsing after this long. The next check decides again: power-cycle
+        if the kettle is idle by then, or pulse again if it is still heating.
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 240
+          unit_of_measurement: minutes
+    adaptive_lighting_switch:
+      name: Adaptive Lighting switch
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: switch
+            integration: adaptive_lighting
+
+# A run either power-cycles the plug or pulses the lights; anything that fires
+# while one is in progress is dropped, and the periodic check picks it up
+# again later if the kettle is still unavailable.
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input kettle_entity
+    to: unavailable
+    for:
+      minutes: !input unreachable_minutes
+  - trigger: time_pattern
+    minutes: /15
+
+variables:
+  kettle_entity: !input kettle_entity
+  unreachable_minutes: !input unreachable_minutes
+  plug_switch: !input plug_switch
+  plug_power: !input plug_power
+  heating_threshold: !input heating_threshold
+  watch_minutes: !input watch_minutes
+  off_seconds: !input off_seconds
+  cooldown_minutes: !input cooldown_minutes
+  lights: !input lights
+  color: !input color
+  brightness: !input brightness
+  alert_minutes: !input alert_minutes
+  adaptive_lighting_switch: !input adaptive_lighting_switch
+  use_adaptive_lighting: "{{ adaptive_lighting_switch != '' }}"
+  scene_id: "kettle_watchdog_{{ this.attributes.id | default('light') | string | slugify }}"
+
+actions:
+  # Timestamps rather than trigger durations, so the periodic check and a
+  # restart in the middle of an outage both see how long it has really been.
+  - condition: template
+    value_template: >-
+      {{ is_state(kettle_entity, 'unavailable')
+         and now() - states[kettle_entity].last_changed
+             >= timedelta(minutes=unreachable_minutes)
+         and is_state(plug_switch, 'on')
+         and now() - states[plug_switch].last_changed
+             >= timedelta(minutes=cooldown_minutes) }}
+
+  - wait_template: >-
+      {{ states(plug_power) | float(0) > heating_threshold
+         or not is_state(kettle_entity, 'unavailable')
+         or is_state(plug_switch, 'off') }}
+    timeout:
+      minutes: "{{ watch_minutes }}"
+  - condition: template
+    value_template: "{{ is_state(kettle_entity, 'unavailable') and is_state(plug_switch, 'on') }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ not wait.completed }}"
+    then:
+      - action: logbook.log
+        data:
+          name: Kettle Watchdog
+          message: "power-cycling {{ state_attr(plug_switch, 'friendly_name') }}: the kettle has been unavailable since {{ as_local(states[kettle_entity].last_changed).strftime('%H:%M') }}"
+          entity_id: "{{ plug_switch }}"
+      - action: switch.turn_off
+        target:
+          entity_id: "{{ plug_switch }}"
+      - delay:
+          seconds: "{{ off_seconds }}"
+      - action: switch.turn_on
+        target:
+          entity_id: "{{ plug_switch }}"
+      - wait_template: "{{ not is_state(kettle_entity, 'unavailable') }}"
+        timeout:
+          minutes: 5
+      - action: logbook.log
+        data:
+          name: Kettle Watchdog
+          message: >-
+            {{ 'the kettle is back' if wait.completed
+               else 'the kettle is still unavailable 5 minutes after the power cycle' }}
+          entity_id: "{{ plug_switch }}"
+      - stop: Power-cycled the plug.
+
+  # The kettle is heating: leave the power alone and ask for a hand.
+  - action: logbook.log
+    data:
+      name: Kettle Watchdog
+      message: "the kettle is unavailable but drawing {{ states(plug_power) }} W; pulsing the lights instead of cutting the power"
+      entity_id: "{{ plug_switch }}"
+  - variables:
+      lights_on_before: "{{ lights | select('is_state', 'on') | list }}"
+      alert_until: "{{ (now() + timedelta(minutes=alert_minutes)).timestamp() }}"
+  - action: scene.create
+    data:
+      scene_id: "{{ scene_id }}"
+      snapshot_entities: "{{ lights }}"
+  - if:
+      - condition: template
+        value_template: "{{ use_adaptive_lighting }}"
+    then:
+      - action: adaptive_lighting.set_manual_control
+        continue_on_error: true
+        data:
+          entity_id: "{{ adaptive_lighting_switch }}"
+          lights: "{{ lights }}"
+          manual_control: true
+
+  # Pulse between full and dim, about once every two seconds, driven from here
+  # so it stops as soon as the plug is turned off.
+  - repeat:
+      until:
+        - condition: template
+          value_template: >-
+            {{ is_state(plug_switch, 'off')
+               or not is_state(kettle_entity, 'unavailable')
+               or now().timestamp() >= alert_until | float }}
+      sequence:
+        - action: light.turn_on
+          continue_on_error: true
+          target:
+            entity_id: "{{ lights }}"
+          data:
+            rgb_color: "{{ color }}"
+            brightness_pct: "{{ brightness }}"
+            transition: 0.5
+        - wait_template: "{{ is_state(plug_switch, 'off') or not is_state(kettle_entity, 'unavailable') }}"
+          timeout: 1
+        - if:
+            - condition: template
+              value_template: "{{ not wait.completed }}"
+          then:
+            - action: light.turn_on
+              continue_on_error: true
+              target:
+                entity_id: "{{ lights }}"
+              data:
+                rgb_color: "{{ color }}"
+                brightness_pct: "{{ [brightness // 5, 1] | max }}"
+                transition: 0.5
+            - wait_template: "{{ is_state(plug_switch, 'off') or not is_state(kettle_entity, 'unavailable') }}"
+              timeout: 1
+
+  - action: scene.turn_on
+    continue_on_error: true
+    target:
+      entity_id: "scene.{{ scene_id }}"
+  # Only release Adaptive Lighting once the lights report the restored state;
+  # a light still reporting on would be adapted and turned back on.
+  - wait_template: "{{ lights | reject('in', lights_on_before) | select('is_state', 'on') | list | length == 0 }}"
+    timeout: 10
+  - delay:
+      seconds: 1
+  - if:
+      - condition: template
+        value_template: "{{ use_adaptive_lighting }}"
+    then:
+      - action: adaptive_lighting.set_manual_control
+        continue_on_error: true
+        data:
+          entity_id: "{{ adaptive_lighting_switch }}"
+          lights: "{{ lights }}"
+          manual_control: false
+  - action: logbook.log
+    data:
+      name: Kettle Watchdog
+      message: >-
+        {{ 'the plug was turned off by hand' if is_state(plug_switch, 'off')
+           else 'the kettle came back by itself' if not is_state(kettle_entity, 'unavailable')
+           else 'stopped pulsing after ' ~ alert_minutes ~ ' minutes; checking again later' }}
+      entity_id: "{{ plug_switch }}"

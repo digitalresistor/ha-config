@@ -17,6 +17,7 @@ recover cleanly from restarts.
 | [Bed Night Light](blueprints/bed_night_light.yml) | automation | Dim red light at night when someone gets out of bed, dimmer if someone else is still asleep, off once they are back in bed. Uses per-side bed presence sensors. |
 | [Bathroom Fan](blueprints/bathroom_fan.yml) | automation | Runs the fan for toilet visits and showers (humidity spike) and makes sure it is never left running. |
 | [Kettle Ready Light](blueprints/kettle_ready_light.yml) | automation | Pulses lights red once a kettle reaches its target temperature, until it is lifted off the base; fires once per heating. |
+| [Kettle Watchdog](blueprints/kettle_watchdog.yml) | automation | Power-cycles a Bluetooth kettle through its smart plug when Home Assistant loses it; pulses lights orange instead if the kettle is heating, until the plug is switched off and on by hand. |
 | [Away Mode](blueprints/away_mode.yml) | automation | Switches the house mode between Home and Away from presence, motion and Guest/Partner toggles, and asks via push notification when it is unsure. |
 | [Make It Dark](blueprints/make_it_dark.yaml) | script | Turns off an Adaptive Lighting area. In Night mode it first primes every light with the sleep color, so lights come back on dim and red instead of bright white. |
 | [Set Adaptive Lighting](blueprints/set_adaptive_lighting.yaml) | script | Applies the same Adaptive Lighting settings to every instance. Run on Home Assistant start, because these settings do not survive a restart. |
