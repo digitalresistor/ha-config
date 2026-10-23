@@ -80,6 +80,18 @@ blueprint:
           min: 0
           max: 60
           unit_of_measurement: seconds
+    min_occupied_time:
+      name: Minimum time lying there
+      description: >-
+        A side only counts as someone getting up if it had been occupied this
+        long before it became empty, so rolling over to the other side for a
+        moment does not turn the light on.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 600
+          unit_of_measurement: seconds
     min_in_bed_time:
       name: Minimum time in bed
       description: >-
@@ -137,12 +149,20 @@ variables:
   brightness_alone: !input brightness_alone
   brightness_shared: !input brightness_shared
   max_on_time: !input max_on_time
+  min_occupied_time: !input min_occupied_time
   min_in_bed_time: !input min_in_bed_time
   adaptive_lighting_switch: !input adaptive_lighting_switch
 
 conditions:
   - condition: template
     value_template: "{{ states('input_select.mode') in night_modes }}"
+  # Rolling across the bed briefly occupies the other side; only a side that
+  # someone was actually lying on counts as them getting up.
+  - condition: template
+    value_template: >-
+      {{ trigger.id != 'out_of_bed'
+         or (trigger.to_state.last_changed - trigger.from_state.last_changed).total_seconds()
+            >= min_occupied_time }}
 
 actions:
   - if:
