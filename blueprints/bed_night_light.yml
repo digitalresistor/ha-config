@@ -4,14 +4,19 @@ blueprint:
     Light the way when someone gets out of bed at night, and turn the light off
     again once they are back in bed.
 
-    In a night mode, when one side of the bed becomes empty the light turns on
+    It runs in a night mode, and also while the optional sleep switch is off,
+    so someone sleeping during the day (with the rest of the house in Home)
+    gets the night light too.
+
+    When one side of the bed becomes empty the light turns on
     in a dim color: at the shared brightness while someone else is still
     asleep (so they are not woken up), at the alone brightness otherwise. A
     side only counts as someone asleep once it has been occupied for the
     minimum time in bed. The light follows the bed while it is on (someone
     else getting up, or coming back), and turns off once everyone who got up
-    is back in bed or after the maximum time. When the night mode ends it is
-    left as it is for whatever takes over, such as a good morning routine.
+    is back in bed or after the maximum time. When the night mode ends (or the
+    sleep switch is turned back on) it is left as it is for whatever takes
+    over, such as a good morning routine.
 
     If an Adaptive Lighting switch is selected, the light is marked as manually
     controlled while it is on so Adaptive Lighting does not change its color or
@@ -48,6 +53,19 @@ blueprint:
             - Movie
             - No Automation
           multiple: true
+    sleep_switch:
+      name: Sleep switch
+      description: >-
+        Optional. While this switch is off the night light runs in any mode,
+        for example the room's automation switch turned off by a bedside
+        remote when someone goes to sleep during the day.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain:
+              - input_boolean
+              - switch
     color:
       name: Color
       default: [255, 0, 0]
@@ -145,6 +163,7 @@ variables:
   bed_sides: !input bed_sides
   light: !input light
   night_modes: !input night_modes
+  sleep_switch: !input sleep_switch
   color: !input color
   brightness_alone: !input brightness_alone
   brightness_shared: !input brightness_shared
@@ -153,9 +172,13 @@ variables:
   min_in_bed_time: !input min_in_bed_time
   adaptive_lighting_switch: !input adaptive_lighting_switch
 
+# "Night" below means a night mode, or the sleep switch being off; the same
+# check is repeated wherever it has to be re-evaluated.
 conditions:
   - condition: template
-    value_template: "{{ states('input_select.mode') in night_modes }}"
+    value_template: >-
+      {{ states('input_select.mode') in night_modes
+         or (sleep_switch != '' and is_state(sleep_switch, 'off')) }}
   # Rolling across the bed briefly occupies the other side; only a side that
   # someone was actually lying on counts as them getting up.
   - condition: template
@@ -223,32 +246,38 @@ actions:
         # changes to the bed that happened in the meantime.
         - wait_template: >-
             {{ sleepers | select('is_state', 'on') | list != in_bed
-               or states('input_select.mode') not in night_modes }}
+               or not (states('input_select.mode') in night_modes
+                       or (sleep_switch != '' and is_state(sleep_switch, 'off'))) }}
           timeout:
             seconds: "{{ [max_on_time - (now().timestamp() - started), 0] | max | round(0) }}"
           continue_on_timeout: true
         # Let the bed settle so someone shifting around is ignored.
         - if:
             - condition: template
-              value_template: "{{ states('input_select.mode') in night_modes }}"
+              value_template: >-
+                {{ states('input_select.mode') in night_modes
+                   or (sleep_switch != '' and is_state(sleep_switch, 'off')) }}
           then:
             - delay:
                 seconds: !input settle_time
         - variables:
             done: >-
               {{ not wait.completed
-                 or states('input_select.mode') not in night_modes
+                 or not (states('input_select.mode') in night_modes
+                         or (sleep_switch != '' and is_state(sleep_switch, 'off')))
                  or sleepers | reject('is_state', 'on') | list | length == 0 }}
       until:
         - condition: template
           value_template: "{{ done }}"
 
-  # Once the night mode has ended the light is left as it is for whatever
-  # takes over (a good morning routine, Adaptive Lighting); it is only handed
-  # back to Adaptive Lighting below.
+  # Once the night has ended the light is left as it is for whatever takes
+  # over (a good morning routine, Adaptive Lighting); it is only handed back
+  # to Adaptive Lighting below.
   - if:
       - condition: template
-        value_template: "{{ states('input_select.mode') in night_modes }}"
+        value_template: >-
+          {{ states('input_select.mode') in night_modes
+             or (sleep_switch != '' and is_state(sleep_switch, 'off')) }}
     then:
       - action: light.turn_off
         target:
