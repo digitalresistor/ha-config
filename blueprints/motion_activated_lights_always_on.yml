@@ -19,10 +19,17 @@ blueprint:
   input:
     motion_entity:
       name: Motion Sensor
+      description: >-
+        A motion, occupancy or presence sensor, for example an Area Occupancy
+        Detection status sensor.
       selector:
         entity:
-          domain: binary_sensor
-          device_class: motion
+          filter:
+            domain: binary_sensor
+            device_class:
+              - motion
+              - occupancy
+              - presence
     adaptive_lighting_switch:
       name: Adaptive Lighting
       description: >-
